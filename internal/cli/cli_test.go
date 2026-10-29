@@ -181,3 +181,63 @@ func TestInvalidInput(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchRankingConfiguration(t *testing.T) {
+	root := setup(t)
+	for i, command := range []string{"git status", "git diff", "git status", "git log"} {
+		record(t, root, command, i+1, 1000+i)
+	}
+	rows := events(t, "search", "--cwd", root, "git")
+	if len(rows) != 3 || rows[0].Command != "git status" || rows[0].Executions != 2 || rows[0].LastUsed != 1002 || rows[0].Score <= 0 {
+		t.Fatal(rows)
+	}
+	if got := run(t, "suggest", "--cwd", root, "--prefix", "git"); got != "git status\n" {
+		t.Fatal(got)
+	}
+	if got := run(t, "search", "--cwd", root, "--match", "fuzzy", "--format", "raw", "gts"); got != "git status\n" {
+		t.Fatal(got)
+	}
+	if got := run(t, "search", "--cwd", root, "--format", "fzf", "--limit", "1", "g"); got != "3\tgit status\x00" {
+		t.Fatalf("fzf: %q", got)
+	}
+	if got := run(t, "search", "--cwd", root, "--limit", "1"); !strings.Contains(got, "2x") {
+		t.Fatal(got)
+	}
+	path := filepath.Join(root, "rank.toml")
+	if err := os.WriteFile(path, []byte("[search]\nrank='recent'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHISTORY_CONFIG", path)
+	rows = events(t, "search", "--cwd", root)
+	if rows[0].Command != "git log" {
+		t.Fatal(rows)
+	}
+	if got := run(t, "suggest", "--cwd", root, "--prefix", "git"); got != "git log\n" {
+		t.Fatal(got)
+	}
+	rows = events(t, "search", "--cwd", root, "--rank", "frecent")
+	if rows[0].Command != "git status" {
+		t.Fatal(rows)
+	}
+	rows = events(t, "search", "--cwd", root, "--dedupe=false")
+	if len(rows) != 4 || rows[0].Command != "git log" {
+		t.Fatal(rows)
+	}
+	// Maintenance must update ranking and statistics as well as the event log.
+	run(t, "delete", "--id", "3")
+	rows = events(t, "search", "--cwd", root, "status")
+	if len(rows) != 1 || rows[0].Executions != 1 || rows[0].ID != 1 {
+		t.Fatal(rows)
+	}
+	run(t, "prune", "--before", "1002")
+	rows = events(t, "search", "--cwd", root)
+	if len(rows) != 1 || rows[0].Command != "git log" {
+		t.Fatal(rows)
+	}
+	for _, args := range [][]string{{"search", "--rank", "bad"}, {"suggest", "--rank", "bad"}, {"search", "--match", "bad"}, {"navigate", "--rank", "frecent"}} {
+		var out bytes.Buffer
+		if err := Run(args, &out, &out); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}

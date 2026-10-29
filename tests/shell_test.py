@@ -1,6 +1,9 @@
 """Real interactive PTY tests, including complete Bash command-line capture."""
 
 import errno
+import fcntl
+import struct
+import termios
 import os
 from pathlib import Path
 import pty
@@ -337,12 +340,20 @@ source '{ROOT}/shell/shistory.bash'
             self.skipTest("system Bash 3.2 not available")
         self.run_shell("/bin/bash")
 
-    def run_selector(self, executable):
+    def run_selector(self, executable, live=False):
         with tempfile.TemporaryDirectory(prefix="shistory-selector-") as temp:
             home = Path(temp).resolve()
             selected = "printf 'selector-marker-é\\n'\n# tab\tand trailing newline\n"
+            if live:
+                selected += "# '$(touch INJECTED)'\n"
+                config = home / "config/shistory"
+                config.mkdir(parents=True)
+                (config / "config.toml").write_text("[history]\nmax_results = 1\n")
             env = dict(os.environ, HOME=str(home), SHISTORY_DB=str(home / "shistory/history.db"), SHISTORY_CONFIG="", XDG_CONFIG_HOME=str(home / "config"), SHISTORY_IGNORE="")
             subprocess.run([str(ROOT / "bin/shistory"), "record", "--session", "selector", "--seq", "1", "--shell", "test", "--cwd", str(home), "--command", selected], env=env, check=True)
+            if live:
+                for seq in (2, 3):
+                    subprocess.run([str(ROOT / "bin/shistory"), "record", "--session", "selector", "--seq", str(seq), "--shell", "test", "--cwd", str(home), "--command", "echo recent-winner"], env=env, check=True)
             if "zsh" in executable:
                 startup = f"""PS1='{PROMPT.decode()}'
 bindkey -e
@@ -363,7 +374,7 @@ _selector_clear() {{ READLINE_LINE=''; READLINE_POINT=0; }}
 bind -x '"\\C-o":_selector_dump'
 bind -x '"\\C-w":_selector_clear'
 """
-            shell = Shell(executable, home, startup, {"FZF_DEFAULT_OPTS": "--filter=selector-marker", "FZF_DEFAULT_OPTS_FILE": "", "SHISTORY_BIND_KEYS": "1"})
+            shell = Shell(executable, home, startup, {"FZF_DEFAULT_OPTS": "--height=12 --no-clear" if live else "--filter=selector-marker", "FZF_DEFAULT_OPTS_FILE": "", "SHISTORY_BIND_KEYS": "1"})
             try:
                 # The prompt is printed just before the editor enters raw mode.
                 time.sleep(0.15)
@@ -378,7 +389,26 @@ bind -x '"\\C-w":_selector_clear'
                     except AssertionError as error:
                         raise AssertionError(cleared) from error
                     time.sleep(0.15)
+                if live:
+                    fcntl.ioctl(shell.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
                 os.write(shell.fd, b"\x12")
+                if live:
+                    deadline = time.monotonic() + 10
+                    while "recent-winner" not in shell.drain():
+                        if time.monotonic() > deadline:
+                            self.fail("initial live results missing: " + shell.drain())
+                        time.sleep(0.02)
+                    self.assertNotIn("selector-marker", shell.drain())
+                    shell.pending = b""
+                    # Quoted fzf placeholders must keep query text out of shell evaluation.
+                    os.write(shell.fd, b"'$(touch INJECTED)'")
+                    deadline = time.monotonic() + 10
+                    while "selector-marker" not in shell.drain():
+                        if time.monotonic() > deadline:
+                            self.fail("live reload did not find older command: " + shell.drain())
+                        time.sleep(0.02)
+                    os.write(shell.fd, b"\r")
+                    shell.prompt()
                 time.sleep(0.2)
                 os.write(shell.fd, b"\x0f")
                 deadline = time.monotonic() + 15
@@ -389,8 +419,11 @@ bind -x '"\\C-w":_selector_clear'
                         self.fail("selector buffer capture timed out: " + shell.startup_output + shell.drain())
                     time.sleep(0.01)
                 self.assertEqual(path.read_text(), selected)
-                self.assertEqual(len(shell.rows()), 1, "selection must not execute")
+                self.assertEqual(len(shell.rows()), 3 if live else 1, "selection must not execute")
+                self.assertFalse((home / "INJECTED").exists(), "query must not execute shell syntax")
                 clear_editor()
+                if live:
+                    return
                 shell.close()
                 shell = Shell(executable, home, startup, {"FZF_DEFAULT_OPTS": "--filter=no-match-selector", "FZF_DEFAULT_OPTS_FILE": "", "SHISTORY_BIND_KEYS": "1"})
                 time.sleep(0.15)
@@ -408,6 +441,14 @@ bind -x '"\\C-w":_selector_clear'
                 clear_editor()
             finally:
                 shell.close()
+
+    def test_zsh_live_selector(self):
+        self.run_selector(shutil.which("zsh"), live=True)
+
+    def test_bash_live_selector(self):
+        if int(subprocess.check_output([shutil.which("bash"), "-c", "echo ${BASH_VERSINFO[0]}"], text=True)) < 4:
+            self.skipTest("Readline bind -x requires Bash 4+")
+        self.run_selector(shutil.which("bash"), live=True)
 
     def test_zsh_selector(self):
         self.run_selector(shutil.which("zsh"))

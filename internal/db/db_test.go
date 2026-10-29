@@ -22,7 +22,7 @@ func TestRejectFutureSchemaAndSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Exec("PRAGMA user_version=2"); err != nil {
+	if _, err := s.Exec("PRAGMA user_version=999"); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -142,7 +142,7 @@ func TestWALTransitionContention(t *testing.T) {
 					t.Fatalf("mode=%q err=%v", mode, err)
 				}
 				var version int
-				if err := target.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 1 {
+				if err := target.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != SchemaVersion {
 					t.Fatalf("version=%d err=%v", version, err)
 				}
 			} else {
@@ -156,5 +156,39 @@ func TestWALTransitionContention(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUpgradeVersionOnePreservesHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = old.Exec(migration); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = old.Exec(`INSERT INTO history(session_id,seq,started_at,command,cwd,scope_type,scope_path,shell)
+ VALUES('old',1,100,'echo preserved','/p','project','/p','zsh'),('old',2,200,'echo preserved','/p','project','/p','zsh')`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var version, count, dirty int
+	if err = s.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.QueryRow("SELECT count(*) FROM history WHERE command='echo preserved'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.QueryRow("SELECT count(*) FROM dirty_commands").Scan(&dirty); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion || count != 2 || dirty != 1 {
+		t.Fatalf("version=%d events=%d dirty=%d", version, count, dirty)
 	}
 }

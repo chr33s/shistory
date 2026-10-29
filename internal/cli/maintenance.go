@@ -10,6 +10,7 @@ import (
 
 	"github.com/chr33s/shistory/internal/config"
 	"github.com/chr33s/shistory/internal/db"
+	"github.com/chr33s/shistory/internal/history"
 	"github.com/chr33s/shistory/internal/scope"
 )
 
@@ -50,12 +51,23 @@ func maintenanceFlags(fs *flag.FlagSet, c config.Config, name string, out io.Wri
 			where += "scope_path = ?"
 			args = append(args, sc.Path)
 		}
-		result, err := s.Exec("DELETE FROM history WHERE "+where, args...)
+		tx, err := s.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		result, err := tx.Exec("DELETE FROM history WHERE "+where, args...)
 		if err != nil {
 			return err
 		}
 		n, err := result.RowsAffected()
 		if err != nil {
+			return err
+		}
+		if err = history.RefreshStats(tx); err != nil {
+			return err
+		}
+		if err = tx.Commit(); err != nil {
 			return err
 		}
 		_, err = fmt.Fprintln(out, n)
@@ -86,7 +98,7 @@ func doctor(s *db.Store, c config.Config, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if integrity != "ok" || mode != "wal" || version != 1 || timeout != 1000 || info.Mode().Perm() != 0600 {
+	if integrity != "ok" || mode != "wal" || version != db.SchemaVersion || timeout != 1000 || info.Mode().Perm() != 0600 {
 		return fmt.Errorf("database health check failed: integrity=%s journal=%s schema=%d timeout=%d permissions=%o", integrity, mode, version, timeout, info.Mode().Perm())
 	}
 	_, err = fmt.Fprintf(out, "database: %s\nintegrity: %s\nschema: %d\njournal: %s\nbusy_timeout: %d ms\npermissions: %04o (directory %04o)\n", c.Database.Path, integrity, version, mode, timeout, info.Mode().Perm(), dir.Mode().Perm())

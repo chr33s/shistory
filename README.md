@@ -82,15 +82,33 @@ hg kubectl                   # search all scopes
 shistory list --directory    # only executions from this exact directory
 shistory list --failed
 shistory search --global --limit 20 'docker compose'
+shistory search --rank recent git
+shistory search --match fuzzy gts
 shistory scope --json
 shistory doctor
 ```
 
-Rows are newest first, ordered by execution timestamp then row ID. Storage keeps
-repeated executions. Search collapses adjacent duplicate commands by default;
-use `--dedupe=false` to see every execution. Search treats `%` and `_` as literal
-text. Suggestions use a literal, case-sensitive prefix. `--session` and
-`--hostname` filter query results.
+Listing and Up/Down navigation are newest first, ordered by execution timestamp
+then row ID. Search and suggestions default to **frecency**: each execution adds
+`2^(-age_days / 30)` to its command's score, so a run's contribution halves every
+30 days. Future timestamps contribute at most one run. Scores count only events
+within the selected scope and filters; ties use the latest execution time and
+row ID. Use `--rank recent` or `[search] rank = "recent"` for recency ordering.
+
+Search and suggestions show each exact command once, represented by its newest
+matching event. Storage retains every execution. `--dedupe=false` displays all
+matching executions; with frecency ranking, each execution uses its command's
+aggregate score, with execution time and ID breaking ties. Table results include
+execution counts and timestamps; grouped/ranked JSON results also include
+`executions`, `last_used` (Unix milliseconds), and `score`.
+
+CLI search defaults to a literal substring: `%`, `_`, and backslashes are literal.
+`--match fuzzy` matches query characters in order, allowing gaps (`gts` matches
+`git status`). Lowercase fuzzy queries ignore case, including Unicode; an
+uppercase query character makes the match case-sensitive. Spaces and punctuation
+are literal; fzf's extended query operators are not interpreted. Suggestions
+always use a literal, case-sensitive prefix. `--session`, `--hostname`, and
+`--failed` filter events before aggregation and ranking.
 
 `--format json` returns complete structured events, `raw` prints command text,
 and `nul` separates unmodified commands with NUL bytes. Table output quotes
@@ -127,6 +145,7 @@ ignore = ["^ls$", "^pwd$", "^clear$"]
 [search]
 scope = "auto" # auto, directory, or global; affects search's default scope
 dedupe = true
+rank = "frecent" # frecent or recent; affects search and suggestions
 ```
 
 `[root] vcs = false` is an alias for disabling Git detection. `SHISTORY_CONFIG`
@@ -202,7 +221,12 @@ bind -x '"\C-r":_shistory_reverse_search'
 ```
 
 Selections are inserted into the editing buffer and never executed automatically.
-Cancellation leaves the buffer unchanged. Zsh's `SHISTORY_BIND_KEYS=1` also
+Cancellation leaves the buffer unchanged. Ctrl-R uses the backend's fuzzy
+matching and selected ranking; fzf displays results without reordering them.
+Typing reloads results after a 100 ms debounce. Each query searches the full
+selected scope before applying `history.max_results`, so commands outside the
+initial displayed results remain discoverable. The initial editing buffer is
+also matched by the backend. Zsh's `SHISTORY_BIND_KEYS=1` also
 binds terminfo Up/Down sequences when available. Manual bindings remain the most
 portable choice. The CLI works without fzf.
 
@@ -235,8 +259,42 @@ The compatibility profile uses revisions in `tests/plugins.json` and tests
 completion registration, rendered autosuggestions, project-only navigation,
 native fallback bindings, scope transitions, retained hooks, and shell re-exec.
 Go tests cover simultaneous first-run migrations/writes, worktrees, symlinks,
-privacy rules, original multiline text, query filters, cursor stability, and
-maintenance commands. CI runs both profiles on macOS and Linux.
+privacy rules, original multiline text, query filters, cursor stability,
+frecency, command summaries, schema upgrades, and maintenance commands. Selector
+PTY tests exercise live query reloads, commands beyond the display limit, and
+literal shell syntax in queries. CI runs both profiles on macOS and Linux.
+
+Search keeps per-directory command summaries in SQLite, updated transactionally
+with new events. Deletion and pruning rebuild only affected command summaries.
+Session, hostname, and failure filters calculate scores from their matching raw
+events. Schema v1 databases upgrade automatically to v2, preserving history;
+the first grouped query builds summaries for existing events and can take longer
+on a large database. Queries and their representative events use one database
+snapshot.
+
+Run the reproducible search benchmarks (100k and 1m events) with:
+
+```sh
+mise run benchmark
+```
+
+Measured on Apple M5 Max / macOS arm64, Go 1.26.5, averaging 10 iterations:
+
+| Operation | 100k events | 1m events |
+| --- | ---: | ---: |
+| Scoped frecency search | 1.75 ms | 2.00 ms |
+| Scoped fuzzy search | 1.38 ms | 1.44 ms |
+| Global frecency search | 10.80 ms | 13.01 ms |
+| Scoped suggestion, query only | 0.13 ms | 0.14 ms |
+| Scoped suggestion, full CLI process | 6.55 ms | 7.01 ms |
+
+The fixture has 20 projects with 1,000 distinct commands each, shared across
+projects, repeated over 90 days. Query timings use an open database; CLI timings
+start a fresh process each time, after warming the executable once. Dataset
+creation and migration backfill are excluded. Summary query cost grows with the
+number of distinct command/directory combinations; filtered queries that need
+raw events can be slower. These measurements support using summaries without
+adding a daemon or a separate text-search index for this workload.
 
 The specification's later roadmap remains future work: history-file import,
 command analytics, export, FTS5 optimization, redaction, a daemon/session scope

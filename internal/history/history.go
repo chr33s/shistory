@@ -10,19 +10,22 @@ import (
 )
 
 type Event struct {
-	ID        int64  `json:"id"`
-	Session   string `json:"session_id"`
-	Seq       int64  `json:"seq"`
-	StartedAt int64  `json:"started_at"`
-	Duration  *int64 `json:"duration_ms"`
-	Command   string `json:"command"`
-	Status    *int   `json:"exit_status"`
-	CWD       string `json:"cwd"`
-	ScopeType string `json:"scope_type"`
-	ScopePath string `json:"scope_path"`
-	Shell     string `json:"shell"`
-	Hostname  string `json:"hostname"`
-	TTY       string `json:"tty"`
+	ID         int64   `json:"id"`
+	Session    string  `json:"session_id"`
+	Seq        int64   `json:"seq"`
+	StartedAt  int64   `json:"started_at"`
+	Duration   *int64  `json:"duration_ms"`
+	Command    string  `json:"command"`
+	Status     *int    `json:"exit_status"`
+	CWD        string  `json:"cwd"`
+	ScopeType  string  `json:"scope_type"`
+	ScopePath  string  `json:"scope_path"`
+	Shell      string  `json:"shell"`
+	Hostname   string  `json:"hostname"`
+	TTY        string  `json:"tty"`
+	Executions int64   `json:"executions,omitempty"`
+	LastUsed   int64   `json:"last_used,omitempty"`
+	Score      float64 `json:"score,omitempty"`
 }
 
 func Record(s *db.Store, c config.Config, e Event) error {
@@ -60,6 +63,9 @@ type Query struct {
 	Hostname string
 	BeforeID int64
 	AfterID  int64
+	Rank     string
+	Match    string
+	Now      int64 // Optional Unix milliseconds, for reproducible ranking.
 }
 
 const columns = `id,session_id,seq,started_at,duration_ms,command,exit_status,cwd,scope_type,scope_path,shell,COALESCE(hostname,''),COALESCE(tty,'')`
@@ -68,6 +74,23 @@ func List(s *db.Store, q Query) ([]Event, error) {
 	if q.Limit < 1 || q.Limit > 100000 {
 		return nil, fmt.Errorf("limit must be between 1 and 100000")
 	}
+	if q.Rank != "" && q.Rank != "recent" && q.Rank != "frecent" {
+		return nil, fmt.Errorf("rank must be recent or frecent")
+	}
+	if q.Match != "" && q.Match != "literal" && q.Match != "fuzzy" {
+		return nil, fmt.Errorf("match must be literal or fuzzy")
+	}
+	if (q.BeforeID != 0 || q.AfterID != 0) && q.Rank == "frecent" {
+		return nil, fmt.Errorf("navigation requires recent ranking")
+	}
+	where, args := queryFilter(q)
+	if q.Dedupe || q.Rank == "frecent" || q.Match == "fuzzy" {
+		return ranked(s, q, where, args)
+	}
+	return chronological(s, q, where, args)
+}
+
+func queryFilter(q Query) (string, []any) {
 	where, args := []string{"1=1"}, []any{}
 	add := func(clause string, values ...any) { where = append(where, clause); args = append(args, values...) }
 	if q.Scope != "" {
@@ -76,7 +99,7 @@ func List(s *db.Store, q Query) ([]Event, error) {
 	if q.CWD != "" {
 		add("cwd = ?", q.CWD)
 	}
-	if q.Text != "" {
+	if q.Text != "" && q.Match != "fuzzy" {
 		pattern := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(q.Text)
 		add(`command LIKE ? ESCAPE '\'`, "%"+pattern+"%")
 	}
@@ -92,6 +115,10 @@ func List(s *db.Store, q Query) ([]Event, error) {
 	if q.Hostname != "" {
 		add("hostname = ?", q.Hostname)
 	}
+	return strings.Join(where, " AND "), args
+}
+
+func chronological(s *db.Store, q Query, where string, args []any) ([]Event, error) {
 	order := "DESC"
 	if q.BeforeID != 0 || q.AfterID != 0 {
 		id, op := q.BeforeID, "<"
@@ -102,31 +129,24 @@ func List(s *db.Store, q Query) ([]Event, error) {
 		if err := s.QueryRow("SELECT started_at FROM history WHERE id = ?", id).Scan(&started); err != nil {
 			return nil, fmt.Errorf("navigation cursor: %w", err)
 		}
-		add("(started_at,id) "+op+" (?,?)", started, id)
+		where += " AND (started_at,id) " + op + " (?,?)"
+		args = append(args, started, id)
 	}
-	sql := "SELECT " + columns + " FROM history WHERE " + strings.Join(where, " AND ") + " ORDER BY started_at " + order + ", id " + order
-	// With dedupe enabled, stream matches until the requested number of displayed rows.
-	if !q.Dedupe {
-		sql += " LIMIT ?"
-		args = append(args, q.Limit)
-	}
+	sql := "SELECT " + columns + " FROM history WHERE " + where + " ORDER BY started_at " + order + ", id " + order
+	sql += " LIMIT ?"
+	args = append(args, q.Limit)
 	rows, err := s.Query(sql, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	result := []Event{}
-	var last string
 	for rows.Next() {
 		var e Event
 		if err := rows.Scan(&e.ID, &e.Session, &e.Seq, &e.StartedAt, &e.Duration, &e.Command, &e.Status, &e.CWD, &e.ScopeType, &e.ScopePath, &e.Shell, &e.Hostname, &e.TTY); err != nil {
 			return nil, err
 		}
-		if q.Dedupe && len(result) > 0 && last == e.Command {
-			continue
-		}
 		result = append(result, e)
-		last = e.Command
 		if len(result) == q.Limit {
 			break
 		}

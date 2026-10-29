@@ -69,8 +69,11 @@ _shistory_reverse_search() {
   command -v fzf >/dev/null 2>&1 || return 0
   local selected
   IFS= read -r -d '' selected < <(
-    command shistory search --cwd "$PWD" --format fzf --limit 10000 |
-      command fzf --read0 --print0 --no-multi --delimiter=$'\t' --with-nth=2.. --query="${READLINE_LINE:-}" --prompt='scoped> '
+    command shistory search --cwd "$PWD" --match fuzzy --query "${READLINE_LINE:-}" --format fzf |
+      SHISTORY_SEARCH_CWD="$PWD" command fzf --read0 --print0 --no-multi \
+        --disabled --no-sort --with-shell='sh -c' --delimiter=$'\t' --with-nth=2.. \
+        --query="${READLINE_LINE:-}" --prompt='scoped> ' \
+        --bind='change:reload(sleep 0.1; command shistory search --cwd "$SHISTORY_SEARCH_CWD" --match fuzzy --format fzf --query {q})'
   )
   if [[ $selected == *$'\t'* ]]; then
     READLINE_LINE=${selected#*$'\t'}

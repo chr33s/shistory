@@ -28,6 +28,7 @@ type Config struct {
 	} `toml:"history"`
 	Search struct {
 		Scope  string `toml:"scope"`
+		Rank   string `toml:"rank"`
 		Dedupe bool   `toml:"dedupe"`
 	} `toml:"search"`
 	ignore []*regexp.Regexp
@@ -61,7 +62,7 @@ func Load() (Config, error) {
 	c.Database.Path = filepath.Join(data, "shistory", "history.db")
 	c.Root.Git = true
 	c.History.IgnoreLeadingSpace, c.History.StoreFailed, c.History.MaxResults = true, true, 100
-	c.Search.Scope, c.Search.Dedupe = "auto", true
+	c.Search.Scope, c.Search.Dedupe, c.Search.Rank = "auto", true, "frecent"
 	path := os.Getenv("SHISTORY_CONFIG")
 	explicit := path != ""
 	if !explicit {
@@ -102,6 +103,9 @@ func Load() (Config, error) {
 	}
 	if c.Search.Scope != "auto" && c.Search.Scope != "global" && c.Search.Scope != "directory" {
 		return c, fmt.Errorf("search.scope must be auto, directory, or global")
+	}
+	if c.Search.Rank != "recent" && c.Search.Rank != "frecent" {
+		return c, fmt.Errorf("search.rank must be recent or frecent")
 	}
 	for _, marker := range c.Root.Markers {
 		if marker == "" || marker == "." || marker == ".." || filepath.Base(marker) != marker {

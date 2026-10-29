@@ -18,6 +18,11 @@ import (
 //go:embed 001_init.sql
 var migration string
 
+//go:embed 002_command_stats.sql
+var commandStatsMigration string
+
+const SchemaVersion = 2
+
 type Store struct{ *sql.DB }
 
 func Open(path string) (*Store, error) {
@@ -75,10 +80,10 @@ func (s *Store) initialize() error {
 	if err := s.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version == 1 {
+	if version == SchemaVersion {
 		return nil
 	}
-	if version > 1 {
+	if version > SchemaVersion {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	// Serialize first-run migration and recheck after acquiring the write lock.
@@ -98,6 +103,14 @@ func (s *Store) initialize() error {
 		if _, err = conn.ExecContext(context.Background(), migration); err != nil {
 			return err
 		}
+	}
+	if version < 2 {
+		if _, err = conn.ExecContext(context.Background(), commandStatsMigration); err != nil {
+			return err
+		}
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf("unsupported database schema %d", version)
 	}
 	_, err = conn.ExecContext(context.Background(), "COMMIT")
 	return err

@@ -28,7 +28,9 @@ else
     '--shell[Shell name]:shell:(bash zsh)' '--command[Command text]:command:' \
     '--started-at[Unix milliseconds]:number:' '--duration-ms[Duration]:number:' \
     '--status[Exit status]:number:' '--hostname[Host]:host:' '--tty[Terminal]:tty:' \
-    '--failed[Failed commands only]' '--dedupe[Collapse adjacent duplicates]' \
+    '--failed[Failed commands only]' '--dedupe[Show each command once]' \
+    '--rank[Result ranking]:ranking:(recent frecent)' \
+    '--match[Search matching]:matching:(literal fuzzy)' \
     '--id[Row ID]:id:' '--before[Unix millisecond cutoff]:number:' \
     '--days[Retention days]:number:' '--json[JSON scope]' '--help[Usage]'
 fi

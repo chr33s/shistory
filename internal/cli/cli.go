@@ -34,6 +34,8 @@ Commands:
   session   Generate a random shell session ID
 
 Query options: --limit N --dedupe[=false] --failed --session ID --hostname NAME
+Search/suggest: --rank recent|frecent (default from search.rank)
+Search: --match literal|fuzzy (default literal)
 Output: --format table|json|raw|nul|fzf (default table; suggest defaults raw)
 Navigation outputs ID<TAB>command; --format json is also available.
 Configuration: SHISTORY_CONFIG, SHISTORY_DB, SHISTORY_IGNORE; see README.md.
@@ -181,13 +183,19 @@ func queryFlags(fs *flag.FlagSet, c config.Config, name string, cwd, format *str
 	global := fs.Bool("global", false, "all scopes")
 	directory := fs.Bool("directory", false, "exact cwd")
 	fs.IntVar(&q.Limit, "limit", c.History.MaxResults, "maximum displayed rows")
-	fs.BoolVar(&q.Dedupe, "dedupe", name == "search" && c.Search.Dedupe, "collapse adjacent duplicate commands")
+	fs.BoolVar(&q.Dedupe, "dedupe", (name == "search" && c.Search.Dedupe) || name == "suggest", "show each exact command once")
 	fs.BoolVar(&q.Failed, "failed", false, "failed commands")
 	fs.StringVar(&q.Session, "session", "", "session filter")
 	fs.StringVar(&q.Hostname, "hostname", "", "hostname filter")
 	fs.Int64Var(&q.BeforeID, "before-id", 0, "older than row ID")
 	fs.Int64Var(&q.AfterID, "after-id", 0, "newer than row ID")
 	fs.StringVar(&q.Text, "query", "", "substring")
+	if name == "search" || name == "suggest" {
+		fs.StringVar(&q.Rank, "rank", c.Search.Rank, "recent or frecent")
+	}
+	if name == "search" {
+		fs.StringVar(&q.Match, "match", "literal", "literal substring or fuzzy subsequence")
+	}
 	direction := fs.String("direction", "older", "older or newer")
 	prefix := fs.String("prefix", "", "literal prefix")
 	if name == "suggest" {
@@ -287,7 +295,11 @@ func printEvents(out io.Writer, format string, events []history.Event) error {
 				status = strconv.Itoa(*e.Status)
 			}
 			// Quoting prevents embedded newlines and terminal controls from corrupting rows.
-			_, err = fmt.Fprintf(out, "%6d  %s  %3s  %s\n", e.ID, time.UnixMilli(e.StartedAt).Format(time.RFC3339), status, strconv.Quote(e.Command))
+			if e.Executions > 0 {
+				_, err = fmt.Fprintf(out, "%6d  %s  %3s  %5dx  %s\n", e.ID, time.UnixMilli(e.StartedAt).Format(time.RFC3339), status, e.Executions, strconv.Quote(e.Command))
+			} else {
+				_, err = fmt.Fprintf(out, "%6d  %s  %3s  %s\n", e.ID, time.UnixMilli(e.StartedAt).Format(time.RFC3339), status, strconv.Quote(e.Command))
+			}
 		}
 		if err != nil {
 			return err

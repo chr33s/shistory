@@ -12,7 +12,7 @@ func TestConfigValidation(t *testing.T) {
 	t.Setenv("SHISTORY_CONFIG", path)
 	t.Setenv("SHISTORY_DB", "")
 	t.Setenv("SHISTORY_IGNORE", "")
-	for _, text := range []string{"unknown = true", "[history]\nignore = ['[']", "[root]\nmarkers = ['../x']", "[history]\nmax_results = 0", "[search]\nscope = 'bad'"} {
+	for _, text := range []string{"unknown = true", "[history]\nignore = ['[']", "[root]\nmarkers = ['../x']", "[history]\nmax_results = 0", "[search]\nscope = 'bad'", "[search]\nrank = 'bad'"} {
 		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 			t.Fatal(err)
 		}

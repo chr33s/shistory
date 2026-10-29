@@ -32,5 +32,8 @@ run = "python tests/compat_test.py"
 [tasks.verify]
 depends = ["test", "check", "shell-test"]
 
+[tasks.benchmark]
+run = "go test ./internal/history -run '^$' -bench BenchmarkQueries -benchtime=10x -count=1"
+
 [tasks.release]
 run = "bash scripts/build-release.sh"

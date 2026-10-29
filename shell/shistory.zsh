@@ -89,8 +89,11 @@ _shistory_reverse_search() {
   local selected
   zle -I
   selected="$(
-    command shistory search --scope "$SHISTORY_SCOPE" --format fzf --limit 10000 |
-      command fzf --read0 --no-print0 --no-multi --delimiter=$'\t' --with-nth=2.. --query="$BUFFER" --prompt='scoped> '
+    command shistory search --scope "$SHISTORY_SCOPE" --match fuzzy --query "$BUFFER" --format fzf |
+      SHISTORY_SEARCH_SCOPE="$SHISTORY_SCOPE" command fzf --read0 --no-print0 --no-multi \
+        --disabled --no-sort --with-shell='sh -c' --delimiter=$'\t' --with-nth=2.. \
+        --query="$BUFFER" --prompt='scoped> ' \
+        --bind='change:reload(sleep 0.1; command shistory search --scope "$SHISTORY_SEARCH_SCOPE" --match fuzzy --format fzf --query {q})'
     printf '.'
   )"
   selected="${selected%.}"
