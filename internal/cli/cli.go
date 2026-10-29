@@ -38,7 +38,7 @@ Search/suggest: --rank recent|frecent (default from search.rank)
 Search: --match literal|fuzzy (default literal)
 Output: --format table|json|raw|nul|fzf (default table; suggest defaults raw)
 Navigation outputs ID<TAB>command; --format json is also available.
-Configuration: SHISTORY_CONFIG, SHISTORY_DB, SHISTORY_IGNORE; see README.md.
+Configuration: SHISTORY_CONFIG, SHISTORY_DB, SHISTORY_IGNORE; see readme.md.
 `
 
 func Run(args []string, out, errOut io.Writer) error {

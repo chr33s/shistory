@@ -10,7 +10,7 @@ for target in "${targets[@]}"; do
   CGO_ENABLED=0 GOOS=$platform GOARCH=$arch go build -trimpath -o "dist/$name/shistory" ./cmd/shistory
   cp shell/shistory.bash shell/shistory.zsh "dist/$name/shell/"
   cp shell/completions/_shistory "dist/$name/shell/completions/"
-  cp shistory.plugin.zsh README.md LICENSE "dist/$name/"
+  cp shistory.plugin.zsh readme.md LICENSE "dist/$name/"
 done
 if [[ "${MACOS_SIGNING_REQUIRED:-0}" == 1 ]]; then
   bash scripts/sign-macos-release.sh

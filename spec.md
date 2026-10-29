@@ -1,1235 +1,139 @@
-# shistory — Sketch
+# shistory specification
 
-## Goal
+This document describes the implemented behavior and design constraints of
+shistory. It is for contributors changing the backend or shell adapters. See
+[readme.md](readme.md) for installation, configuration examples, keybindings,
+and release instructions. Unimplemented proposals are listed under
+[Future work](#future-work).
 
-Build a Zsh/Bash plugin that stores shell history in SQLite and scopes history by:
+## Purpose and boundaries
 
-1. **Project root**, when the current directory belongs to a project.
-2. **Current directory**, when no project root is detected.
+shistory stores completed Bash and Zsh execution events in SQLite. History is
+shared across directories within a project; outside a project, it belongs to
+the exact directory where the command began. Users can query either scope or
+search across all scopes.
 
-The core UX should feel like normal shell history, while allowing fast queries such as:
+The adapters preserve native shell history. Scoped suggestions and keybindings
+are opt-in. Selecting a command inserts it into the editing buffer and never
+executes it automatically. No database sync occurs.
 
-- history for the current project
-- history for the current directory
-- global history
-- search by command text
-- optionally replay or insert a selected command
+Repeated executions remain distinct events. Deduplication and frecency ranking
+change query results, not the underlying execution log.
 
----
-
-## Name
-
-`shistory`
-
----
-
-## High-level architecture
+## Architecture
 
 ```text
-                    ┌──────────────────────────────┐
-                    │          SQLite DB           │
-                    │ ~/.local/share/shistory.db   │
-                    └──────────────┬───────────────┘
-                                   │
-                         shared CLI / library
-                                   │
-                    ┌──────────────▼───────────────┐
-                    │       shistory binary        │
-                    │ detect scope / insert/query  │
-                    └───────────┬───────────┬──────┘
-                                │           │
-                         ┌──────▼───┐   ┌──▼───────┐
-                         │   Zsh    │   │   Bash   │
-                         │ adapter  │   │ adapter  │
-                         └──────────┘   └──────────┘
+Zsh preexec/precmd ─┐
+                   ├── shistory CLI ── SQLite
+Bash DEBUG/prompt ──┘        │
+                            ├── scope detection and configuration
+                            ├── privacy filters and event recording
+                            └── queries, ranking, and output formatting
 ```
 
-Keep shell code thin. Put scope detection, SQLite writes, migrations, filtering, and search in one executable.
-
-A compiled binary is ideal eventually, but an MVP can be written in Python, Go, Rust, or even shell + `sqlite3`.
-
-
----
-
-## Recommended stack
-
-### Production choice
-
-Use:
-
-```text
-Go
-├── database/sql
-├── pure-Go SQLite driver
-├── TOML configuration
-├── native CLI / small command dispatcher
-├── Zsh adapter
-├── Bash adapter
-└── optional fzf integration
-```
-
-Recommended layers:
-
-| Layer | Choice |
-|---|---|
-| Core language | Go |
-| Database | SQLite |
-| SQLite access | `database/sql` + pure-Go SQLite driver |
-| Shell integration | Thin `.zsh` and `.bash` adapters |
-| Config | TOML |
-| Search | SQLite queries first, FTS5 later |
-| Interactive search | Optional `fzf` |
-| Packaging | Single binary + shell init scripts |
-| Tests | Go unit/integration tests + shell smoke tests |
-
-### Why Go
-
-Go is the default recommendation because this is primarily a shell/CLI utility rather than a native desktop application.
-
-Advantages:
-
-- fast startup
-- simple single-binary distribution
-- straightforward SQLite support
-- easy macOS and Linux releases
-- strong cross-compilation story
-- good fit for filesystem/process-oriented tooling
-- low runtime/deployment friction
-- simpler maintenance than Rust for a small utility
-
-The target release matrix can be:
-
-```text
-darwin/arm64
-darwin/amd64
-linux/amd64
-linux/arm64
-```
-
-This matters because shell configuration often follows the user onto:
-
-```text
-local macOS machines
-Linux workstations
-remote servers
-dev containers
-WSL
-CI environments
-```
-
-### Why not Swift as the default
-
-Swift is technically a strong fit on macOS and has an excellent SQLite ecosystem.
-
-A Swift stack would look like:
-
-```text
-Swift
-├── Swift Argument Parser
-├── GRDB
-├── Foundation
-├── Swift Package Manager
-└── thin Bash/Zsh adapters
-```
-
-Swift is preferable if the project is expected to evolve into a macOS-native product with:
-
-```text
-SwiftUI
-AppKit
-Keychain
-Spotlight
-LaunchAgents
-iCloud
-menu-bar UI
-```
-
-For a CLI-first tool intended to work across macOS and Linux, Go has the simpler deployment and release story.
-
-Decision rule:
-
-```text
-CLI-first + macOS/Linux + remote machines
-    -> Go
-
-macOS-first + likely native UI/platform integration
-    -> Swift
-```
-
-If this remains a personal macOS-only tool and the maintainer is significantly more productive in Swift, Swift is a fully reasonable choice.
-
-### Why not Python for production
-
-Python is useful for prototyping the shell lifecycle and scoping semantics.
-
-It is less attractive for the production binary because the tool may run around every interactive command.
-
-Potential drawbacks:
-
-- interpreter startup
-- runtime dependency
-- packaging complexity
-- environment/version management
-- less convenient distribution to remote machines
-
-A Python proof of concept is still useful before finalizing the shell hooks.
-
-### Why not shell + `sqlite3`
-
-Shell plus the `sqlite3` CLI is acceptable for a spike, but becomes brittle when handling:
-
-```text
-multiline commands
-quoting
-binary-safe arguments
-migrations
-configuration
-concurrency
-structured output
-root detection
-search
-```
-
-Keep shell as an integration layer only.
-
-### Why not Rust as the default
-
-Rust would also be a strong implementation choice:
-
-- native startup
-- static binaries
-- strong SQLite libraries
-- low runtime overhead
-
-But for this project, Go achieves the important operational properties with less implementation complexity.
-
-Rust is a good choice if the project is also intended as a systems-programming exercise.
-
-### SQLite driver
-
-Prefer a pure-Go SQLite driver so releases do not require CGO.
-
-Benefits:
-
-- simpler cross-compilation
-- easier static-ish release artifacts
-- fewer native build dependencies
-- easier installation on remote machines
-
-If advanced SQLite extension compatibility becomes important later, a CGO-based driver can be reconsidered.
-
-### CLI framework
-
-Avoid a heavy CLI framework initially.
-
-The MVP only needs commands such as:
-
-```text
-shistory record
-shistory list
-shistory search
-shistory scope
-shistory doctor
-shistory prune
-```
-
-The Go standard library plus a small dispatcher is sufficient.
-
-Introduce something like Cobra only if the command surface becomes substantially larger.
-
-### Configuration stack
-
-Use TOML:
-
-```text
-~/.config/shistory/config.toml
-```
-
-TOML is preferable here because the configuration is user-edited and hierarchical.
-
-Example:
-
-```toml
-[database]
-path = "~/.local/share/shistory/history.db"
-
-[root]
-git = true
-markers = []
-
-[history]
-ignore_leading_space = true
-store_failed = true
-max_results = 100
-
-[search]
-scope = "auto"
-dedupe = true
-```
-
-### Search stack
-
-Start with ordinary indexed SQLite queries.
-
-Use:
-
-```sql
-WHERE command LIKE ?
-```
-
-for the initial implementation.
-
-Add SQLite FTS5 only when:
-
-- the database grows large enough to justify it
-- richer tokenized search is needed
-- prefix/fuzzy-ish matching becomes important
-
-Do not introduce an external search service.
-
-### Interactive UI stack
-
-Keep `fzf` optional.
-
-Core behavior:
-
-```text
-shistory search <query>
-```
-
-Optional richer behavior:
-
-```text
-Ctrl-R
-  -> shistory emits candidates
-  -> fzf filters/selects
-  -> shell adapter inserts selected command into the buffer
-```
-
-The backend must remain useful without `fzf`.
-
-### Recommended source layout
-
-```text
-shistory/
-├── cmd/
-│   └── shistory/
-│       └── main.go
-├── internal/
-│   ├── config/
-│   │   └── config.go
-│   ├── db/
-│   │   ├── db.go
-│   │   └── migrations.go
-│   ├── history/
-│   │   ├── record.go
-│   │   ├── list.go
-│   │   └── search.go
-│   ├── scope/
-│   │   ├── detect.go
-│   │   └── git.go
-│   └── session/
-│       └── session.go
-├── shell/
-│   ├── shistory.zsh
-│   └── shistory.bash
-├── migrations/
-│   └── 001_init.sql
-├── go.mod
-└── README.md
-```
-
-The main architectural rule is:
-
-> Make the shell adapters dumb and make the Go binary authoritative.
-
-Scope detection, persistence, migrations, filtering, config, search semantics, and formatting should all live in the Go core.
-
----
+The Go backend owns configuration, scope detection, persistence, migrations,
+filtering, query semantics, and formatting. The shell adapters capture lifecycle
+state and connect query output to the editor. Keep that division when adding
+features: quoting and shell lifecycle handling belong in the adapters; shared
+history behavior belongs in Go.
+
+The implementation uses Go's `database/sql`, the pure-Go `modernc.org/sqlite`
+driver, TOML configuration, and the standard-library flag parser. Releases are
+CGO-free binaries for macOS and Linux on ARM64 and AMD64. This supports the
+selected deployment model without a Python interpreter or SQLite CLI at runtime.
+Python is used for PTY tests. fzf is optional and supplies the Ctrl-R selector.
+
+Go is the settled implementation choice. Earlier language comparisons and
+prototypes are not requirements for contributors. A daemon, an external search
+service, and FTS5 are not part of the current architecture.
+
+| Responsibility                            | Source                                                                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Entrypoint and command dispatch           | [cmd/shistory/main.go](cmd/shistory/main.go), [internal/cli/cli.go](internal/cli/cli.go)                     |
+| Configuration and ignore rules            | [internal/config/config.go](internal/config/config.go)                                                       |
+| Scope detection                           | [internal/scope/detect.go](internal/scope/detect.go)                                                         |
+| Database setup and migrations             | [internal/db](internal/db)                                                                                   |
+| Event recording and chronological queries | [internal/history/history.go](internal/history/history.go)                                                   |
+| Ranking and summary maintenance           | [internal/history/rank.go](internal/history/rank.go), [internal/history/stats.go](internal/history/stats.go) |
+| Session identity                          | [internal/session/session.go](internal/session/session.go)                                                   |
+| Shell adapters                            | [shell/shistory.zsh](shell/shistory.zsh), [shell/shistory.bash](shell/shistory.bash)                         |
+| Zinit entrypoint and completion           | [shistory.plugin.zsh](shistory.plugin.zsh), [shell/completions/_shistory](shell/completions/_shistory)       |
 
 ## Scope model
 
-For every command, compute:
+Each stored event contains:
+
+| Field        | Meaning                                                    |
+| ------------ | ---------------------------------------------------------- |
+| `cwd`        | Canonical directory where the command began.               |
+| `scope_type` | `project` when a root is detected; otherwise `directory`.  |
+| `scope_path` | Canonical project root, or `cwd` when no root is detected. |
+
+Scope detection resolves symlinks and requires an existing directory. It then:
+
+1. Tries `git -C <cwd> rev-parse --show-toplevel` when Git detection is enabled.
+   Ambient `GIT_*` variables are excluded so they cannot redirect detection to
+   another repository. The Git subprocess has a one-second timeout.
+2. If no Git root is found, walks from `cwd` toward the filesystem root looking
+   for configured markers. The nearest matching directory wins. Marker detection
+   is opt-in; the default list is empty.
+3. Falls back to the exact canonical `cwd`.
+
+Git roots take precedence over markers. Linked Git worktrees have separate
+project scopes. Marker names may include `go.mod`, `package.json`, or
+`pyproject.toml`; they must be individual names, not paths. Other VCS metadata
+can be configured as markers, but there is no separate Mercurial or SVN detector.
+
+For example, executions from `/home/me/src/acme/api` and
+`/home/me/src/acme/web` share the scope `/home/me/src/acme` when that is their Git
+root. An execution from `/home/me/Downloads` belongs only to that directory when
+no project root is detected.
+
+### Query scope
+
+| Option          | Behavior                                                                               |
+| --------------- | -------------------------------------------------------------------------------------- |
+| No scope option | Detect the scope from the current directory. For `search`, apply `search.scope` first. |
+| `--cwd DIR`     | Use `DIR` as the directory for scope detection.                                        |
+| `--directory`   | Match the exact canonical directory instead of its project root.                       |
+| `--scope PATH`  | Match a supplied scope path; intended for the canonical path cached by an adapter.     |
+| `--global`      | Query all scopes.                                                                      |
+
+`--global`, `--directory`, and `--scope` are mutually exclusive. Query
+`--scope` expands the supplied path but does not rediscover its project root;
+`delete --scope` and `prune --scope` detect the scope from the supplied directory.
+
+The adapters capture `cwd` before execution. Therefore `cd ../other-project`
+belongs to the directory it was entered from. The backend detects the scope
+from that captured directory when it records the completed event.
+
+## Recording and session identity
+
+A shell session calls `shistory session` once to obtain a random 128-bit ID,
+encoded as 32 hexadecimal characters. It maintains a positive, increasing
+sequence number for completed events. The database's unique `(session_id, seq)`
+constraint makes repeated delivery of an event idempotent.
+
+The lifecycle is:
 
 ```text
-cwd        = directory where command was executed
-project    = detected project root, if one exists
-scope_type = "project" if project != null else "directory"
-scope_path = project if project != null else cwd
+before execution:
+    capture the starting directory and timestamp
+    Zsh also captures the complete command text here
+
+at the next prompt:
+    capture exit status and calculate duration
+    Bash obtains the complete accepted history entry here
+    submit one completed event with shistory record
+    clear pending state
 ```
 
-Examples:
-
-```text
-~/src/acme/api/src
-  git root: ~/src/acme
-  scope: project:/home/me/src/acme
-
-~/Downloads
-  no project root
-  scope: directory:/home/me/Downloads
-```
-
-This gives stable project-wide history while preserving directory-local history elsewhere.
-
----
-
-## Project root detection
-
-Start conservative.
-
-### MVP
-
-Use Git:
-
-```sh
-git -C "$PWD" rev-parse --show-toplevel
-```
-
-Only treat it as a project root when that succeeds.
-
-### Later
-
-Support configurable root markers:
-
-```text
-.git
-.hg
-.svn
-package.json
-pyproject.toml
-go.mod
-Cargo.toml
-Gemfile
-pom.xml
-```
-
-Recommended semantics:
-
-- Git/VCS roots take precedence.
-- Marker-based detection is opt-in or configurable.
-- Cache `cwd -> root` mappings in memory per shell session.
-
-Example config:
-
-```toml
-[root]
-vcs = true
-markers = ["pyproject.toml", "package.json", "go.mod", "Cargo.toml"]
-```
-
----
-
-## SQLite schema
-
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-
-CREATE TABLE IF NOT EXISTS history (
-    id            INTEGER PRIMARY KEY,
-    session_id    TEXT NOT NULL,
-    seq           INTEGER NOT NULL,
-
-    started_at    INTEGER NOT NULL, -- unix ms
-    duration_ms   INTEGER,
-
-    command       TEXT NOT NULL,
-    exit_status   INTEGER,
-
-    cwd           TEXT NOT NULL,
-    scope_type    TEXT NOT NULL CHECK (scope_type IN ('project', 'directory')),
-    scope_path    TEXT NOT NULL,
-
-    shell         TEXT NOT NULL,
-    hostname      TEXT,
-    tty           TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_history_scope_time
-    ON history(scope_path, started_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_history_cwd_time
-    ON history(cwd, started_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_history_time
-    ON history(started_at DESC);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_history_session_seq
-    ON history(session_id, seq);
-```
-
-Optional FTS search:
-
-```sql
-CREATE VIRTUAL TABLE IF NOT EXISTS history_fts
-USING fts5(command, content='history', content_rowid='id');
-```
-
-For an MVP, `LIKE '%foo%'` is enough. Add FTS when the DB gets large.
-
----
-
-## Command lifecycle
-
-Capture two events:
-
-```text
-pre-command
-  command text
-  cwd
-  project root / scope
-  timestamp
-
-post-command
-  exit status
-  duration
-```
-
-The pre-command state matters because the command itself may change directory.
-
-Example:
-
-```sh
-cd ../other-project
-```
-
-That command belongs to the scope where it was entered, not the resulting directory.
-
----
-
-## Zsh integration
-
-Zsh provides clean hooks.
-
-Use:
-
-```zsh
-autoload -Uz add-zsh-hook
-
-add-zsh-hook preexec  _shistory_preexec
-add-zsh-hook precmd   _shistory_precmd
-```
-
-Sketch:
-
-```zsh
-typeset -g SHISTORY_CMD=""
-typeset -g SHISTORY_STARTED_NS=""
-
-_shistory_preexec() {
-  SHISTORY_CMD="$1"
-  SHISTORY_STARTED_NS="$(date +%s%N)"
-
-  command shistory begin \
-    --session "$SHISTORY_SESSION_ID" \
-    --cwd "$PWD" \
-    --command "$SHISTORY_CMD"
-}
-
-_shistory_precmd() {
-  local status=$?
-
-  command shistory end \
-    --session "$SHISTORY_SESSION_ID" \
-    --status "$status"
-}
-```
-
-A better implementation avoids invoking the backend twice per command. For example:
-
-- store the pending command in shell variables
-- write the previous command during `precmd`
-- or batch writes through a lightweight daemon
-
-For MVP simplicity, two calls are acceptable if the backend is fast enough.
-
----
-
-## Bash integration
-
-Bash is trickier.
-
-Use a `DEBUG` trap to observe a command before execution, and `PROMPT_COMMAND` to finalize it after execution.
-
-Do **not** blindly replace existing traps or `PROMPT_COMMAND`; chain them.
-
-Sketch:
-
-```bash
-_shistory_debug_trap() {
-  local last_status=$?
-
-  [[ "$BASH_COMMAND" == _shistory_* ]] && return
-  [[ "${SHISTORY_INTERNAL:-0}" == 1 ]] && return
-
-  _shistory_pending_cmd="$BASH_COMMAND"
-  _shistory_pending_cwd="$PWD"
-  _shistory_started_at="$EPOCHREALTIME"
-}
-
-_shistory_prompt_command() {
-  local status=$?
-
-  if [[ -n "${_shistory_pending_cmd:-}" ]]; then
-    SHISTORY_INTERNAL=1 shistory record \
-      --session "$SHISTORY_SESSION_ID" \
-      --cwd "$_shistory_pending_cwd" \
-      --command "$_shistory_pending_cmd" \
-      --status "$status"
-    unset SHISTORY_INTERNAL
-  fi
-}
-```
-
-### Bash caveat
-
-`DEBUG` fires for individual simple commands, including pieces of pipelines and shell internals.
-
-For robust command-line capture, an alternative is to read the most recently accepted interactive history entry:
-
-```bash
-history 1
-```
-
-and flush it from `PROMPT_COMMAND`.
-
-That tends to better match what the user typed.
-
-Recommended Bash MVP:
-
-1. Enable history immediately:
-   ```bash
-   shopt -s histappend
-   ```
-2. On every prompt:
-   - save `$?`
-   - run `history -a`
-   - obtain the latest complete history entry
-   - dedupe by history number/session sequence
-   - write it to SQLite using the *captured pre-command cwd*
-
-If exact multiline/pipeline behavior matters, test extensively across Bash versions.
-
----
-
-## Session identity
-
-Generate once when the shell starts:
-
-```sh
-SHISTORY_SESSION_ID="$HOSTNAME-$$-$(date +%s)"
-```
-
-Prefer a random UUID when available:
-
-```sh
-SHISTORY_SESSION_ID="$(uuidgen 2>/dev/null || printf '%s-%s-%s' "$HOSTNAME" "$$" "$RANDOM")"
-```
-
-Also keep a monotonic per-session sequence number.
-
-This helps with:
-
-- duplicate suppression
-- ordering commands emitted in the same millisecond
-- merging multiple shells safely
-
----
-
-## Backend CLI
-
-Minimal API:
-
-```text
-shistory record
-shistory list
-shistory search
-shistory scope
-shistory prune
-shistory doctor
-```
-
-### Record
-
-```sh
-shistory record \
-  --session "$SHISTORY_SESSION_ID" \
-  --seq 42 \
-  --shell zsh \
-  --cwd "$PWD" \
-  --command 'npm test' \
-  --status 1 \
-  --duration-ms 842
-```
-
-The backend should compute the root itself:
-
-```text
-cwd -> detect project root -> choose scope -> insert
-```
-
-This keeps root semantics identical across Bash and Zsh.
-
-### Query current scope
-
-```sh
-shistory list --cwd "$PWD"
-```
-
-Backend:
-
-```text
-cwd
-  -> project root if present
-  -> otherwise cwd
-  -> SELECT ... WHERE scope_path = ?
-```
-
-### Search current scope
-
-```sh
-shistory search --cwd "$PWD" 'kubectl'
-```
-
-### Search globally
-
-```sh
-shistory search --global 'kubectl'
-```
-
----
-
-## Shell UX
-
-Keep the normal shell history mechanism intact initially.
-
-Add a scoped history command:
-
-```sh
-h
-```
-
-Equivalent to:
-
-```sh
-shistory list --cwd "$PWD"
-```
-
-Suggested aliases/functions:
-
-```sh
-h          # current project/directory history
-hg foo     # global search
-hs foo     # scoped search
-```
-
-Example:
-
-```text
-$ hs migrate
-  928  2h   0   ./manage.py migrate
-  903  1d   1   ./manage.py migrate --plan
-  711  6d   0   alembic upgrade head
-```
-
----
-
-## Arrow-key integration
-
-There are two levels.
-
-### Phase 1 — low risk
-
-Keep native Up/Down behavior untouched.
-
-Provide:
-
-```text
-Ctrl-R -> scoped SQLite search
-```
-
-This gives most of the value without fighting shell internals.
-
-For Zsh, bind a ZLE widget.
-
-For Bash, use Readline bindings or an external selector such as `fzf`.
-
-### Phase 2 — replace history navigation
-
-Implement Up/Down so it queries SQLite for the current scope.
-
-This is feasible, but significantly more invasive because the shell already maintains its own in-memory history state.
-
-Recommendation: avoid it in the MVP.
-
----
-
-## Scoped reverse search
-
-Best UX:
-
-```text
-Ctrl-R
-  ┌ scoped: ~/src/acme
-  │
-  │ > docker
-  │
-  │ docker compose up db
-  │ docker compose exec api bash
-  │ docker build -t acme-api .
-  └
-```
-
-On selection, insert the command into the current editing buffer instead of executing it.
-
-Zsh:
-
-```zsh
-BUFFER="$selected"
-CURSOR=${#BUFFER}
-```
-
-Bash can use Readline helpers or bind to a shell function where supported.
-
----
-
-## Deduplication
-
-Recommended policy:
-
-- never dedupe at storage time by command text alone
-- preserve actual execution history
-- dedupe only when displaying search results
-
-Why:
-
-```text
-make test
-make test
-make test
-```
-
-is meaningful execution history.
-
-For interactive search, collapsing adjacent duplicates is useful.
-
-Example SQL:
-
-```sql
-SELECT *
-FROM history
-WHERE scope_path = ?
-ORDER BY started_at DESC
-LIMIT 500;
-```
-
-Then collapse adjacent identical `command` values in the CLI.
-
----
-
-## Ignore rules
-
-Support familiar history exclusions.
-
-Environment variable:
-
-```sh
-SHISTORY_IGNORE='^(ls|cd|pwd|clear)$'
-```
-
-Or config:
-
-```toml
-[history]
-ignore = [
-  "^ls$",
-  "^cd( .*)?$",
-  "^pwd$",
-  "^clear$"
-]
-ignore_leading_space = true
-store_failed = true
-```
-
-Important default:
-
-```text
-commands beginning with a space are not stored
-```
-
-This mirrors a common shell-history privacy convention.
-
-Also consider filtering obvious secret-bearing commands, but do not promise secret detection as a security boundary.
-
----
-
-## Security
-
-The database may contain credentials pasted into commands.
-
-Minimum safeguards:
-
-```text
-0600 ~/.local/share/shistory/history.db
-0700 ~/.local/share/shistory/
-```
-
-Do not sync the DB by default.
-
-Add:
-
-```sh
-shistory delete --id ...
-shistory delete --scope .
-shistory vacuum
-```
-
-Potential later feature:
-
-```toml
-[redact]
-patterns = [
-  "(?i)(password|token|secret)=\\S+"
-]
-```
-
-Treat redaction as best-effort only.
-
----
-
-## Concurrency
-
-SQLite is a strong fit because many shells may append simultaneously.
-
-Use:
-
-```sql
-PRAGMA journal_mode=WAL;
-PRAGMA busy_timeout=1000;
-```
-
-Each record should be a short transaction.
-
-Avoid keeping a transaction open between `preexec` and `precmd`.
-
-Instead, either:
-
-### Option A — one insert after command completes
-
-Keep pending command metadata in shell variables:
-
-```text
-preexec:
-  remember command + cwd + started_at
-
-precmd:
-  compute duration + status
-  INSERT complete row
-```
-
-This is the preferred design.
-
-### Option B — insert then update
-
-Works, but doubles writes and leaves partial rows if a shell is killed.
-
----
-
-## Recommended final hook model
-
-### Zsh
-
-```text
-preexec:
-  pending.command = full command line
-  pending.cwd = $PWD
-  pending.started_at = now
-
-precmd:
-  status = $?
-  shistory record(pending..., status, duration)
-```
-
-### Bash
-
-```text
-before command:
-  capture cwd + start time
-
-PROMPT_COMMAND:
-  status = $?
-  obtain newest complete history entry
-  shistory record(...)
-```
-
-The hard part in Bash is pairing the complete accepted command line with the directory where it began.
-
-A practical solution is:
-
-```text
-DEBUG trap:
-  capture cwd/start only once per prompt cycle
-
-PROMPT_COMMAND:
-  read latest complete history entry
-  persist it
-  reset state
-```
-
----
-
-## Suggested implementation language
-
-### Go
-
-Strong default for a standalone plugin:
-
-- one binary
-- fast startup
-- easy SQLite support
-- easy distribution
-- no runtime dependency
-
-Layout:
-
-```text
-cmd/shistory/
-    main.go
-
-internal/db/
-    db.go
-    migrations.go
-
-internal/scope/
-    detect.go
-
-internal/history/
-    record.go
-    query.go
-
-shell/
-    shistory.zsh
-    shistory.bash
-```
-
-Rust is also a good fit, but Go will likely be simpler for this utility.
-
-Python is ideal for proving the design before compiling it.
-
----
-
-## Config
-
-```text
-~/.config/shistory/config.toml
-```
-
-Example:
-
-```toml
-[database]
-path = "~/.local/share/shistory/history.db"
-
-[root]
-git = true
-markers = []
-
-[history]
-ignore_leading_space = true
-store_failed = true
-max_results = 100
-
-[search]
-scope = "auto"
-dedupe = true
-```
-
----
-
-## Useful SQL queries
-
-### Current scope
-
-```sql
-SELECT id, started_at, exit_status, cwd, command
-FROM history
-WHERE scope_path = ?
-ORDER BY started_at DESC
-LIMIT ?;
-```
-
-### Failed commands
-
-```sql
-SELECT started_at, cwd, command, exit_status
-FROM history
-WHERE scope_path = ?
-  AND exit_status <> 0
-ORDER BY started_at DESC;
-```
-
-### Project commands executed from a subdirectory
-
-```sql
-SELECT cwd, command
-FROM history
-WHERE scope_path = ?
-ORDER BY started_at DESC;
-```
-
-### Most-used commands
-
-This is more useful after normalizing command binaries separately.
-
-```sql
-SELECT command, COUNT(*) AS n
-FROM history
-WHERE scope_path = ?
-GROUP BY command
-ORDER BY n DESC
-LIMIT 20;
-```
-
----
-
-## Optional normalized command field
-
-Later, store the executable separately:
-
-```text
-command:      "git commit -am 'fix'"
-command_name: "git"
-```
-
-Then queries such as:
-
-```text
-last 50 git commands in this project
-failed npm commands
-most common tools by project
-```
-
-become cheap.
-
----
-
-## MVP
-
-### v0.1
-
-Implement:
-
-- SQLite DB creation/migrations
-- Git project-root detection
-- fallback to current directory
-- Zsh `preexec` + `precmd`
-- Bash capture using `DEBUG` + `PROMPT_COMMAND`
-- `record`
-- `list`
-- `search`
-- `--global`
-- ignore leading-space commands
-- WAL + busy timeout
-- current-scope `h` command
-
-Do not replace shell-native Up/Down history yet.
-
-### v0.2
-
-Add:
-
-- Ctrl-R scoped search
-- `fzf` integration
-- marker-based roots
-- display dedupe
-- durations
-- import from `.zsh_history` / `.bash_history`
-
-### v0.3
-
-Add:
-
-- command analytics
-- pruning
-- export
-- optional hostname/session filtering
-- sync only if explicitly designed with encryption
-
----
-
-## Example behavior
-
-Directory tree:
-
-```text
-~/src/acme/
-├── .git/
-├── api/
-└── web/
-```
-
-Commands:
-
-```text
-~/src/acme/api $ pytest
-~/src/acme/web $ npm test
-```
-
-Both are stored under:
-
-```text
-scope_type = project
-scope_path = /home/me/src/acme
-```
-
-Then:
-
-```text
-~/src/acme/api $ h
-pytest
-npm test
-
-~/src/acme/web $ h
-pytest
-npm test
-```
-
-Outside projects:
-
-```text
-~/Downloads $ unzip foo.zip
-~/Downloads $ h
-unzip foo.zip
-```
-
-Stored under:
-
-```text
-scope_type = directory
-scope_path = /home/me/Downloads
-```
-
----
-
-## Main design decisions
-
-1. **SQLite is the source of truth; shell adapters only capture events.**
-2. **Scope is computed centrally by the backend.**
-3. **A Git root defines one shared project-history namespace.**
-4. **Outside projects, history is exact-directory scoped.**
-5. **Store complete execution events; dedupe only in search/display.**
-6. **Use one completed INSERT after the command returns.**
-7. **Keep native history navigation initially; replace Ctrl-R first.**
-8. **Preserve leading-space privacy behavior.**
-9. **Use WAL mode so multiple shells can write concurrently.**
-10. **Keep Zsh/Bash adapters small enough to audit.**
-
----
-
-## Minimal command contract
-
-The shell adapter only needs to call:
+There is no open database transaction while the user's command runs. The adapter
+makes one `record` call per captured event; the backend inserts the event and
+updates its command summary in the same transaction. There are no `begin` or
+`end` CLI commands.
+
+The adapter-to-backend contract is:
 
 ```sh
 shistory record \
@@ -1239,474 +143,377 @@ shistory record \
   --cwd "$command_start_cwd" \
   --started-at "$started_at" \
   --status "$exit_status" \
+  --duration-ms "$duration_ms" \
   --command "$command"
 ```
 
-Everything else belongs in the backend.
+These variables represent values captured by the adapter. `record` requires a
+nonempty session ID and shell name, a positive sequence number, and a nonnegative
+start time in Unix milliseconds. Status, when supplied, must be 0–255; duration
+must be nonnegative milliseconds. Omitted status and duration are stored as NULL.
+The CLI defaults the start time to now and the hostname to the local hostname.
 
-That separation is the key design choice: shell integration stays fragile-but-small, while all persistence and scoping logic remains deterministic and testable.
+Original command text, including tabs and newlines, is retained as supplied to
+the backend. Ignore rules run before insertion. Commands excluded by the shell
+before the adapter can observe them cannot be recovered.
 
----
+### Zsh capture
 
-## Zinit and existing Zsh plugin compatibility
+`preexec` saves the full command text, starting directory, and timestamp.
+`precmd` captures the exit status before other work, computes the duration, and
+records the event. Hooks are registered with `add-zsh-hook`; the adapter does
+not replace hook arrays or define a competing standalone `precmd` function.
 
-The plugin must coexist with common Zinit-managed Zsh plugins, especially:
+The adapter caches the current scope at startup and refreshes it through
+`chpwd`. `_shistory_refresh_scope` supports explicit invalidation, for example
+after creating a repository without changing directories. Suggestions and
+navigation use the cached scope to avoid running Git detection on each keypress.
 
-```zsh
-zinit light zsh-users/zsh-completions
-zinit light zsh-users/zsh-autosuggestions
-zinit light zsh-users/zsh-history-substring-search
-```
+### Bash capture
 
-### Compatibility summary
+The DEBUG trap captures the starting directory and time once per accepted
+history entry. At the next prompt, the adapter reads the complete entry from
+native history. It does not treat each `$BASH_COMMAND` value as a separate event:
+DEBUG also fires for individual commands within pipelines and shell internals.
 
-| Plugin | Coexists unchanged? | Uses SQLite scoped history automatically? | Recommended integration |
-|---|---:|---:|---|
-| `zsh-users/zsh-completions` | Yes | N/A | Keep unchanged |
-| `zsh-users/zsh-autosuggestions` | Yes | No | Add a `shistory` suggestion strategy |
-| `zsh-users/zsh-history-substring-search` | Yes | No | Replace Up/Down bindings with `shistory` ZLE widgets |
+The adapter chains existing DEBUG code and both scalar and array
+`PROMPT_COMMAND` forms. It retains the incoming status for existing hooks.
+`histappend` is enabled and `history -a` runs at each prompt; native `HISTFILE`,
+`HISTCONTROL`, and `HISTIGNORE` remain configured by the user.
 
-The SQLite plugin should not replace or disable normal Zsh history. Native history remains available as a compatibility/fallback layer.
+Bash 3.2 supports recording and CLI commands. Readline Ctrl-R requires Bash 4+.
+On Bash versions without `EPOCHREALTIME`, timestamps have one-second resolution.
+With `cmdhist` and `lithist`, multiline entries are retained as typed; without
+`lithist`, Bash may normalize them into semicolon-separated text.
 
-### `zsh-completions`
+### Capture limits
 
-No special history integration is required.
+Both adapters finalize events at a later prompt. Commands that terminate or
+replace the shell, such as `exit` and `exec`, cannot be finalized this way.
+A shell killed before its next prompt also loses its pending event.
 
-`zsh-completions` extends Zsh's completion system through functions on `$fpath`; it does not depend on how command history is persisted.
+Bash history suppression, including `ignoredups` and `erasedups`, may prevent
+repeated accepted lines from being captured. Users who want every execution
+must omit those suppression options. Backend write failures are suppressed by
+the adapters so recording errors do not interrupt interactive use.
 
-Ensure completion initialization happens after the completion definitions have been made available.
+## Storage and concurrency
 
-A simple setup is:
+The default database is `$XDG_DATA_HOME/shistory/history.db`, falling back to
+`~/.local/share/shistory/history.db`. Configuration and `SHISTORY_DB` can select
+a different path. The schema is defined by the embedded migrations:
 
-```zsh
-zinit light zsh-users/zsh-completions
+- [001_init.sql](internal/db/001_init.sql) creates the execution log and its indexes.
+- [002_command_stats.sql](internal/db/002_command_stats.sql) adds command summaries,
+  invalidation tracking, and maintenance triggers.
 
-autoload -Uz compinit
-compinit
-```
+The current schema version is 2. Existing version-1 databases upgrade
+automatically without removing execution events. Their existing command groups
+are marked for summary construction; the first query that uses summaries builds
+them. That first query can take longer on a large history. Newer, unsupported
+schema versions are rejected.
 
-For a more Zinit-native setup, `zicompinit` / `zicdreplay` may be used.
+### Execution log
 
-`shistory` should eventually ship its own completion definition:
+The `history` table stores `id`, `session_id`, `seq`, `started_at`, `duration_ms`,
+`command`, `exit_status`, `cwd`, `scope_type`, `scope_path`, `shell`, `hostname`,
+and `tty`. Time values are milliseconds. Nullable status and duration distinguish
+missing metadata from successful or zero-duration executions.
 
-```text
-shell/completions/_shistory
-```
+Indexes support scope/time, directory/time, and global/time ordering, with row ID
+as the timestamp tie-breaker. A unique session/sequence index suppresses duplicate
+delivery. A scope/directory/command/time index supports summary reconstruction.
+Do not deduplicate stored events by command text.
 
-supporting:
+### Command summaries
 
-```text
-shistory record
-shistory list
-shistory search
-shistory scope
-shistory doctor
-shistory prune
-```
+`command_stats` has one row per exact `(scope_path, cwd, command)` combination.
+It stores the execution count, newest timestamp and row ID, and a decayed weight
+relative to that timestamp. Anchoring the weight at the newest event avoids an
+exponentially growing weight measured from a fixed epoch.
 
-### `zsh-autosuggestions`
+Insert triggers update summaries transactionally, including out-of-order events.
+Delete and update triggers mark affected groups in `dirty_commands`. Deletion
+and pruning rebuild affected groups before committing. Queries using summaries
+also repair dirty groups, including groups awaiting their first build after an
+upgrade.
 
-The plugin can be loaded normally:
+Unfiltered, deduplicated queries can combine these summaries. Session, hostname,
+and failure filters calculate statistics from matching raw events. Queries with
+deduplication disabled also use raw events. If a summary contains a future
+timestamp, ranking falls back to raw events to clamp each contribution correctly.
 
-```zsh
-zinit light zsh-users/zsh-autosuggestions
-```
+### Locking and snapshots
 
-However, its default `history` strategy searches Zsh's native `$history` associative array.
+SQLite uses WAL, `synchronous=NORMAL`, a 1000 ms busy timeout, and short write
+transactions. Each backend process uses one open database connection. First-run
+migration is serialized and rechecks the schema version after taking the write
+lock. The rollback-to-WAL transition retries BUSY responses within a one-second
+budget.
 
-Therefore:
+Ranked queries read statistics and representative events in one database
+snapshot. If concurrent summary construction prevents a reader from upgrading
+its snapshot to a writer, the query retries from a fresh snapshot within the
+configured retry budget. No transaction spans the execution of a user command.
 
-```text
-SQLite contains project-scoped history
-        !=
-native Zsh history used by default autosuggestions
-```
+## Query contracts
 
-Without integration, autosuggestions continue to work, but suggestions are based on native/global Zsh history rather than the current `shistory` scope.
+The CLI provides `record`, `list`, `search`, `suggest`, `navigate`, `scope`,
+`doctor`, `delete`, `prune`, `vacuum`, and `session`. `shistory help` lists the
+commands; `<command> --help` lists its flags.
 
-#### Custom `shistory` autosuggestion strategy
+| Command    | Default result                                                          |
+| ---------- | ----------------------------------------------------------------------- |
+| `list`     | Execution events, newest first, without deduplication.                  |
+| `search`   | Matching commands, deduplicated and frecency-ranked.                    |
+| `suggest`  | One command matching a literal, case-sensitive prefix, frecency-ranked. |
+| `navigate` | One older or newer event for chronological editor navigation.           |
+| `scope`    | Detected scope path, or scope metadata with `--json`.                   |
 
-Provide a Zsh adapter function:
+`search.rank` controls ranking for search and suggestions. `search.dedupe`
+controls search's default deduplication. `history.max_results` defaults to 100
+and applies to list/search; suggest and navigate default to one result.
+`--limit` overrides the default and must be between 1 and 100,000.
 
-```zsh
-_zsh_autosuggest_strategy_shistory() {
-  local prefix="$1"
+Session, hostname, failure, scope, directory, and text filters apply before
+aggregation and ranking. `--failed` selects nonzero exit statuses; events with
+unknown status do not match. Matching and ranking happen before the displayed
+result limit is applied.
 
-  suggestion="$(
-    command shistory suggest \
-      --cwd "$PWD" \
-      --prefix "$prefix" \
-      --limit 1 \
-      2>/dev/null
-  )"
-}
-```
+### Matching
 
-Configure:
+CLI search defaults to a literal substring match. `%`, `_`, and backslashes are
+escaped before constructing the SQL `LIKE` pattern. It uses SQLite's default
+LIKE case behavior: ASCII letters match without regard to case; non-ASCII case
+variants are distinct.
 
-```zsh
-ZSH_AUTOSUGGEST_STRATEGY=(shistory completion)
-```
+`search --match fuzzy` matches query characters in order, allowing gaps: `gts`
+matches `git status`. Queries with no uppercase character ignore case, including
+Unicode letters. Any uppercase character makes the query case-sensitive. Spaces
+and punctuation are literal. The backend does not interpret fzf's extended
+search operators.
 
-Semantics:
+Suggestions always use a literal, case-sensitive prefix, including literal
+`%` and `_` characters. Navigation uses a substring query.
 
-```text
-typing:      git ch
-cwd:         ~/src/acme/api
-project:     ~/src/acme
+### Ranking and deduplication
 
-query:
-  most recent command
-  WHERE scope_path = ~/src/acme
-  AND command starts with "git ch"
-
-suggestion:
-  git checkout feature/foo
-```
-
-The backend should expose a specialized fast command:
-
-```text
-shistory suggest --cwd <cwd> --prefix <prefix>
-```
-
-rather than using the full general-purpose search output.
-
-Requirements for `suggest`:
-
-- output command text only
-- no headings
-- no timestamps
-- no ANSI output
-- one result by default
-- very low startup/query latency
-- escape nothing; emit the original command exactly
-
-Suggested query:
-
-```sql
-SELECT command
-FROM history
-WHERE scope_path = ?
-  AND command LIKE ? || '%'
-ORDER BY started_at DESC, id DESC
-LIMIT 1;
-```
-
-For prefix matching, an indexed or FTS-based optimization can be added later if needed.
-
-#### Autosuggestion performance
-
-Autosuggestions may query on each buffer change.
-
-Therefore `shistory suggest` is on a latency-sensitive path.
-
-Targets:
+`--rank frecent` is the default for search and suggestions. For each exact
+command, sum the contributions of its matching executions:
 
 ```text
-process startup + query:
-  ideal     < 5 ms
-  usable    < 15 ms
+age_days = max(0, (now_ms - started_at_ms) / 86400000)
+score = sum(2^(-age_days / 30))
 ```
 
-Do not run Git root detection from scratch on every keystroke if it requires spawning `git`.
+Each run contributes one initially, one-half after 30 days, and one-quarter after
+60 days. Future timestamps contribute at most one. Frequencies from excluded
+scopes or filtered-out events do not affect the score. Equal scores are ordered
+by newest matching execution time, then row ID, both descending.
 
-The Zsh adapter should cache:
+`--rank recent` orders results by execution time and row ID without using the
+score to determine their position. Listing and navigation remain chronological.
+
+With deduplication enabled, each exact command appears once, represented by its
+newest matching event. This collapses nonadjacent repetitions as well as adjacent
+ones. With `--dedupe=false`, every matching execution is eligible for display;
+under frecency ranking, each uses its command's aggregate score, with the event's
+own timestamp and ID breaking ties.
+
+For a scope containing these executions in order:
 
 ```text
-PWD -> scope_path
+./manage.py migrate --plan
+alembic upgrade head
+./manage.py migrate
 ```
 
-and refresh the scope on:
+literal search with explicit recency ordering produces:
 
 ```text
-chpwd
-shell startup
-explicit invalidation
+$ shistory search --rank recent --format raw migrate
+./manage.py migrate
+./manage.py migrate --plan
 ```
 
-Then call:
+`alembic upgrade head` is excluded because it does not contain `migrate`.
+The `raw` format in this example deliberately omits table metadata.
 
-```zsh
-shistory suggest --scope "$SHISTORY_SCOPE" --prefix "$prefix"
-```
+### Navigation
 
-instead of:
+Navigation cursors identify a stored row; the backend resolves its timestamp
+and compares `(started_at, id)` tuples. `--before-id` walks older events and
+`--after-id` walks newer events. Concurrent inserts do not shift an offset.
+A cursor whose row has been deleted returns an error. Ranked or deduplicated
+queries do not support navigation cursors.
 
-```zsh
-shistory suggest --cwd "$PWD" ...
-```
+The Zsh widgets retain the original query, current row ID, last returned buffer,
+and scope. An empty buffer traverses the scope; a nonempty buffer filters by
+substring. Repeated Up walks older matches. Down walks newer matches and restores
+the original query at the newest boundary. Editing the returned buffer or
+changing scope resets navigation.
 
-This keeps autosuggestions responsive.
+### Output formats
 
-### `zsh-history-substring-search`
+| Format             | Contract                                                                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `table`            | Row ID, execution timestamp, exit status, and quoted command text; grouped/ranked results also show execution count.                    |
+| `json`             | Structured event array. Grouped/ranked results add `executions`, `last_used`, and `score`; zero-valued aggregate fields may be omitted. |
+| `raw`              | Original command text followed by an output newline.                                                                                    |
+| `nul`              | Original commands separated by NUL bytes.                                                                                               |
+| `fzf`              | `ID<TAB>command<NUL>` records, preserving multiline commands.                                                                           |
+| Navigation default | `ID<TAB>command` with no added newline.                                                                                                 |
 
-This plugin also coexists with `shistory`, but its own widgets search Zsh's native history.
+`suggest` defaults to `raw`; `navigate` defaults to its navigation format and can
+also return JSON. Table output quotes command text so embedded newlines and
+terminal control characters do not corrupt rows. Adapters must split IDs from
+command text and preserve original trailing newlines. Use the existing adapters
+as the implementation reference rather than reimplementing command substitution.
 
-Its normal bindings:
+## Interactive integration
 
-```zsh
-bindkey '^[[A' history-substring-search-up
-bindkey '^[[B' history-substring-search-down
-```
+The adapters expose `h` for listing, `hs` for search using the configured default
+scope, and `hg` for global search, while preserving existing commands with those
+names. Loading an adapter twice is safe; re-executing the shell creates a new
+session. Loading the plugin neither builds nor downloads the binary.
 
-will therefore remain global/native rather than project-scoped.
+### Ctrl-R
 
-For the desired SQLite behavior, `shistory` should provide equivalent ZLE widgets:
+The selector pipeline is:
 
 ```text
-shistory-history-up
-shistory-history-down
+initial buffer or changed query
+    -> backend fuzzy match over the selected scope
+    -> backend aggregation and ranking
+    -> displayed result limit
+    -> fzf selection
+    -> insert command text into the shell editor
 ```
 
-Conceptually:
-
-```zsh
-_shistory_history_up() {
-  local result
-
-  result="$(
-    command shistory navigate \
-      --scope "$SHISTORY_SCOPE" \
-      --query "$BUFFER" \
-      --direction older
-  )"
-
-  [[ -n "$result" ]] || return 0
-
-  BUFFER="$result"
-  CURSOR=${#BUFFER}
-}
-
-zle -N shistory-history-up _shistory_history_up
-```
-
-and similarly for `down`.
-
-Bindings:
-
-```zsh
-bindkey '^[[A' shistory-history-up
-bindkey '^[[B' shistory-history-down
-```
-
-The SQLite-backed widgets should implement the behavior users expect from `zsh-history-substring-search`:
-
-```text
-empty buffer:
-    walk backward/forward through current scoped history
-
-non-empty buffer:
-    substring search inside current scoped history
-
-repeated Up:
-    older match
-
-repeated Down:
-    newer match
-```
-
-State should remain in Zsh variables between widget invocations:
-
-```text
-query
-current result ID
-scope
-direction
-```
-
-The backend API should support stable navigation using history row IDs rather than sending an offset that becomes invalid if another shell inserts rows.
-
-Example:
-
-```text
-shistory navigate \
-  --scope /Users/me/src/acme \
-  --query docker \
-  --before-id 8421
-```
-
-### Keep `zsh-history-substring-search` as an optional fallback
-
-It is acceptable to continue loading:
-
-```zsh
-zinit light zsh-users/zsh-history-substring-search
-```
-
-while binding the arrow keys to `shistory`.
-
-This allows alternate bindings for native/global history if desired:
-
-```zsh
-# SQLite project-scoped navigation
-bindkey '^[[A' shistory-history-up
-bindkey '^[[B' shistory-history-down
-
-# Optional native/global history fallback
-bindkey '^P' history-substring-search-up
-bindkey '^N' history-substring-search-down
-```
-
-Alternatively, once `shistory`'s widgets fully reproduce the desired behavior, the history-substring-search plugin can be removed.
-
-### Interaction with `zsh-autosuggestions` widgets
-
-`zsh-autosuggestions` wraps ZLE widgets and already knows about the upstream history-substring-search widget names.
-
-Add the `shistory` widget names to its clear-widget list:
-
-```zsh
-ZSH_AUTOSUGGEST_CLEAR_WIDGETS+=(
-  shistory-history-up
-  shistory-history-down
-)
-```
-
-This avoids stale inline suggestions while the history navigation widget changes the edit buffer.
-
-### Hook safety
-
-Use Zsh's hook mechanism:
-
-```zsh
-autoload -Uz add-zsh-hook
-
-add-zsh-hook preexec _shistory_preexec
-add-zsh-hook precmd  _shistory_precmd
-add-zsh-hook chpwd   _shistory_chpwd
-```
-
-Do not overwrite:
-
-```text
-preexec_functions
-precmd_functions
-chpwd_functions
-```
-
-and do not assign a standalone `precmd()` or `preexec()` function that could interfere with other plugins.
-
-This is important in a plugin-rich Zinit setup.
-
-### Recommended Zinit load order
-
-A straightforward configuration:
-
-```zsh
-# Completion definitions
-zinit light zsh-users/zsh-completions
-
-autoload -Uz compinit
-compinit
-
-# ZLE/history UI plugins
-zinit light zsh-users/zsh-autosuggestions
-zinit light zsh-users/zsh-history-substring-search
-
-# Load shistory last so its final keybindings win.
-source /path/to/shistory/shell/shistory.zsh
-```
-
-Then configure:
-
-```zsh
-ZSH_AUTOSUGGEST_STRATEGY=(shistory completion)
-
-ZSH_AUTOSUGGEST_CLEAR_WIDGETS+=(
-  shistory-history-up
-  shistory-history-down
-)
-
-bindkey '^[[A' shistory-history-up
-bindkey '^[[B' shistory-history-down
-
-# Optional native/global fallback:
-bindkey '^P' history-substring-search-up
-bindkey '^N' history-substring-search-down
-```
-
-The exact arrow-key escape sequences vary by terminal, so the installer should not assume `^[[A` and `^[[B` universally.
-
-### Better Zinit packaging
-
-The repository should itself be loadable with Zinit:
-
-```zsh
-zinit light yourname/shistory
-```
-
-Repository layout:
-
-```text
-shistory/
-├── shistory.plugin.zsh
-├── shell/
-│   ├── shistory.zsh
-│   ├── shistory.bash
-│   └── completions/
-│       └── _shistory
-└── ...
-```
-
-`shistory.plugin.zsh` should:
-
-1. verify that the `shistory` binary exists
-2. initialize the session ID
-3. cache the current scope
-4. register `preexec`, `precmd`, and `chpwd` through `add-zsh-hook`
-5. define ZLE widgets
-6. define the autosuggestions strategy when `zsh-autosuggestions` is present
-7. avoid forcing keybindings unless explicitly enabled by config
-
-### Recommended default behavior around existing plugins
-
-The safest default is:
-
-```text
-zsh-completions:
-    untouched
-
-zsh-autosuggestions:
-    automatically expose `shistory` strategy
-    user/config chooses whether it is enabled
-
-zsh-history-substring-search:
-    untouched unless user enables shistory navigation bindings
-
-native HISTFILE:
-    preserved
-
-SQLite:
-    authoritative enhanced/scoped history store
-```
-
-This makes installation non-destructive and allows gradual adoption.
-
-### Compatibility acceptance tests
-
-Add an integration test profile equivalent to:
-
-```zsh
-zinit light zsh-users/zsh-completions
-zinit light zsh-users/zsh-autosuggestions
-zinit light zsh-users/zsh-history-substring-search
-zinit light yourname/shistory
-```
-
-Test:
-
-```text
-1. `compinit` succeeds.
-2. Existing completions still work.
-3. Autosuggestions still render.
-4. `shistory` autosuggestions only return current-scope commands.
-5. Up/Down only traverse current-scope SQLite history when shistory bindings are enabled.
-6. Ctrl-P/Ctrl-N can still traverse native history if fallback bindings are configured.
-7. Changing directories inside one project does not change scope.
-8. Changing to another project changes scope.
-9. Changing to a non-project directory selects that exact directory as scope.
-10. Multiple shells can insert history concurrently.
-11. Existing plugin hooks remain registered.
-12. `exec zsh` does not produce duplicate hook registrations.
-
+The backend owns both matching and ranking. fzf receives `--disabled --no-sort`
+and NUL-separated records, so it does not apply its own matching or scoring.
+Query changes reload results after a 100 ms debounce. Each reload searches the
+full selected scope before limiting results; there is no fixed 10,000-event
+candidate window.
+
+Zsh uses its cached scope. Bash passes the current directory to search, which
+also respects `search.scope`. Query placeholders are shell-quoted by fzf, and
+reload commands use `sh -c`. Cancellation leaves the original editing buffer
+unchanged. Multiline selections, tabs, quotes, and trailing newlines must survive
+selection without execution.
+
+### Zsh plugins and bindings
+
+| Plugin                         | Integration                                                                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `zsh-completions`              | Keep completion behavior; the entrypoint adds shistory's completion directory and registers `_shistory` when `compdef` is available. |
+| `zsh-autosuggestions`          | Expose the `shistory` strategy; the user enables it with `ZSH_AUTOSUGGEST_STRATEGY=(shistory completion)`.                           |
+| `zsh-history-substring-search` | Preserve native/global widgets; users may bind shistory's widgets to arrows and retain native widgets on alternate keys.             |
+
+The adapter adds its navigation widgets to `ZSH_AUTOSUGGEST_CLEAR_WIDGETS`
+without replacing existing entries. It registers hooks through `add-zsh-hook`.
+The [README's Zinit example](readme.md#zinit-and-zsh-plugins) provides the load
+order, completion replay, scoped bindings, and optional Ctrl-P/Ctrl-N fallback.
+Arrow-key escape sequences vary by terminal; explicit bindings use the user's
+actual sequences.
+
+No bindings change by default. `SHISTORY_BIND_KEYS=1` enables Ctrl-R in Zsh and
+Bash 4+; in Zsh it also binds available terminfo Up/Down sequences. Zsh users
+can instead bind `shistory-history-up`, `shistory-history-down`, and
+`shistory-reverse-search` individually.
+
+Suggestions are latency-sensitive because they may run on each buffer change.
+The design targets are less than 5 ms ideally and less than 15 ms for usable
+process startup plus query time. These are targets, not guarantees. See
+[the measured workload and timings](readme.md#performance-and-database-upgrades)
+for the current implementation.
+
+## Configuration, privacy, and maintenance
+
+The configuration file is `$XDG_CONFIG_HOME/shistory/config.toml`, falling back
+to `~/.config/shistory/config.toml`. A missing default file is allowed; an explicit
+missing `SHISTORY_CONFIG` is an error. Unknown settings and invalid values are
+rejected. The [README configuration example](readme.md#configuration-and-privacy)
+is the user-facing reference.
+
+| Setting                        | Default or effect                                                                |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| `database.path`                | XDG data path, or `~/.local/share/shistory/history.db`.                          |
+| `root.git`                     | `true`; `root.vcs` is an alias controlling the same Git setting.                 |
+| `root.markers`                 | Empty; opt in to marker-based roots.                                             |
+| `history.ignore_leading_space` | `true`.                                                                          |
+| `history.store_failed`         | `true`.                                                                          |
+| `history.max_results`          | `100`.                                                                           |
+| `history.ignore`               | Empty list of Go regular expressions.                                            |
+| `search.scope`                 | `auto`; also accepts `directory` or `global`. Applies to search's default scope. |
+| `search.dedupe`                | `true`.                                                                          |
+| `search.rank`                  | `frecent`; also accepts `recent`. Applies to search and suggestions.             |
+
+`SHISTORY_CONFIG` selects a config file. `SHISTORY_DB` overrides the database
+path. `SHISTORY_IGNORE` adds one Go regular expression to the configured ignore
+rules. Blank commands are ignored. Leading-space commands are ignored by default;
+failed events are ignored when `history.store_failed` is false.
+
+The database may contain credentials pasted into commands. Ignore rules do not
+perform secret detection. The database file has mode 0600 and its dedicated
+`shistory` directory has mode 0700. Custom shared parent directories are not
+chmodded, and a database path that names a symlink or another nonregular file
+is rejected. There is no synchronization or redaction feature.
+
+| Command                  | Effect                                                                                                                             |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `delete --id ID`         | Remove one execution event.                                                                                                        |
+| `delete --scope DIR`     | Detect the scope of `DIR` and remove its events.                                                                                   |
+| `prune --before UNIX_MS` | Remove events with a start time strictly before the cutoff.                                                                        |
+| `prune --days N`         | Compute a calendar-day cutoff; pruning is global unless `--scope DIR` is supplied.                                                 |
+| `vacuum`                 | Reclaim database space.                                                                                                            |
+| `doctor`                 | Check configuration loading, database integrity, schema version, WAL, timeout, and file permissions; report directory permissions. |
+
+Deletion and pruning print the number of removed execution rows. Their summary
+updates commit with the deletion. `vacuum` is a separate operation.
+
+## Verification and acceptance criteria
+
+`mise run verify` runs Go tests, `go vet`, and interactive Bash/Zsh PTY tests.
+`mise run compat-test` downloads the pinned revisions in
+[tests/plugins.json](tests/plugins.json) and exercises the Zinit profile.
+CI runs both on macOS and Linux. `mise run benchmark` measures 100k- and
+1m-event datasets; it is a performance measurement, not a fixed latency gate.
+
+Changes must preserve these behaviors:
+
+- Project subdirectories share history; other projects and unrelated directories
+  do not leak into scoped results. Worktrees and symlinks follow the scope rules.
+- `cd` is recorded against its starting directory. Pipelines and multiline input
+  are captured as one event where the shell lifecycle permits it.
+- Repeated executions remain stored; repeated delivery of the same session/sequence
+  does not create another event. Ignore rules retain their privacy behavior.
+- Search deduplicates nonadjacent commands and computes frequencies within all
+  active filters. Literal prefix characters and fuzzy case rules remain intact.
+- Search can find a command older than 10,000 newer events. Live Ctrl-R can find
+  results outside its initial display limit without executing query syntax.
+- Suggestions render in the current scope. Scoped Up/Down retains its cursor
+  across concurrent inserts and restores the original query at the newest boundary.
+- Selection preserves multiline text and trailing newlines; cancellation preserves
+  the original buffer. Selecting a command does not execute it.
+- Multiple shells can initialize and write the database concurrently. Schema
+  upgrades preserve events; summary rebuilding, deletion, and pruning retain
+  accurate counts and representative rows.
+- `compinit` and existing completions work; native/global fallback bindings remain
+  available; existing hooks are retained. Changing scopes refreshes editor state.
+- Re-sourcing does not duplicate hooks, and `exec zsh` starts a new session without
+  duplicate registration.
+
+## Future work
+
+These proposals are not implemented and are not release commitments:
+
+| Proposal                                  | Constraint or reason to revisit                                                                                           |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Import `.zsh_history` and `.bash_history` | Define how imported entries represent missing scope, status, duration, and session metadata.                              |
+| Analytics and export                      | Preserve the distinction between execution events and aggregated commands.                                                |
+| Separate executable-name field            | Could support tool-level analytics; exact-command counts already work without normalization.                              |
+| FTS5 or another SQLite search index       | Consider when measured workloads or tokenized matching requirements justify it; retain literal and fuzzy query contracts. |
+| Bash scope cache or daemon                | Revisit if measured startup or scope-detection cost warrants the added lifecycle complexity.                              |
+| Configurable redaction                    | Treat it as best-effort handling, not a secret-detection security boundary.                                               |
+| Encrypted sync                            | Design encryption and conflict handling explicitly before introducing synchronization.                                    |
