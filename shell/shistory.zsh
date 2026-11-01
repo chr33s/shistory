@@ -118,9 +118,6 @@ for _shistory_widget in shistory-history-up shistory-history-down; do
   fi
 done
 unset _shistory_widget
-(( $+functions[h] || $+aliases[h] )) || function h { command shistory list --cwd "$PWD" "$@"; }
-(( $+functions[hs] || $+aliases[hs] )) || function hs { command shistory search --cwd "$PWD" "$@"; }
-(( $+functions[hg] || $+aliases[hg] )) || function hg { command shistory search --global "$@"; }
 
 # Bind only on request. Users can also bind the widgets themselves after loading.
 if [[ "${SHISTORY_BIND_KEYS:-0}" == 1 ]]; then

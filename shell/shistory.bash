@@ -108,9 +108,6 @@ if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a '* ]]; then
 else
   PROMPT_COMMAND="_shistory_prompt${PROMPT_COMMAND:+$'\n'$PROMPT_COMMAND}"$'\n'"$_shistory_install_trap"$'\n_shistory_prompt_ready'
 fi
-if ! type h >/dev/null 2>&1; then function h { command shistory list --cwd "$PWD" "$@"; }; fi
-if ! type hs >/dev/null 2>&1; then function hs { command shistory search --cwd "$PWD" "$@"; }; fi
-if ! type hg >/dev/null 2>&1; then function hg { command shistory search --global "$@"; }; fi
 if [[ ${SHISTORY_BIND_KEYS:-0} == 1 ]] && (( BASH_VERSINFO[0] >= 4 )); then
   bind -x '"\C-r":_shistory_reverse_search'
 fi

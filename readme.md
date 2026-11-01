@@ -61,9 +61,9 @@ shell starts a fresh random session. No keybindings change by default.
 ## Use
 
 ```sh
-h                            # list current project/directory history
-hs migrate                   # search the current scope
-hg kubectl                   # search all scopes
+shistory list                # list current project/directory history
+shistory search migrate      # search using the configured default scope
+shistory search --global kubectl # search all scopes
 shistory list --directory    # only executions from this exact directory
 shistory list --failed
 shistory search --global --limit 20 'docker compose'
@@ -71,6 +71,15 @@ shistory search --rank recent git
 shistory search --match fuzzy gts
 shistory scope --json
 shistory doctor
+```
+
+The adapters do not define command shortcuts. To add your own, put shell aliases
+in `~/.zshrc` or `~/.bashrc`, for example:
+
+```sh
+alias h='shistory list'
+alias hs='shistory search'
+alias hg='shistory search --global'
 ```
 
 ### Ranking and matching
@@ -199,8 +208,7 @@ without changing directories, run `_shistory_refresh_scope`.
 
 Zsh hooks are registered using `add-zsh-hook`. Completion definitions can be
 loaded before `compinit`; when `compdef` is already available the Zinit entrypoint
-registers `_shistory` immediately. Existing `h`, `hs`, and `hg` commands are
-preserved.
+registers `_shistory` immediately.
 
 ## Optional scoped Ctrl-R
 

@@ -372,10 +372,10 @@ as the implementation reference rather than reimplementing command substitution.
 
 ## Interactive integration
 
-The adapters expose `h` for listing, `hs` for search using the configured default
-scope, and `hg` for global search, while preserving existing commands with those
-names. Loading an adapter twice is safe; re-executing the shell creates a new
-session. Loading the plugin neither builds nor downloads the binary.
+The adapters do not define command shortcuts. Users can define shell aliases in
+their own shell configuration. Loading an adapter twice is safe; re-executing the
+shell creates a new session. Loading the plugin neither builds nor downloads the
+binary.
 
 ### Ctrl-R
 
