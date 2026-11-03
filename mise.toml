@@ -37,3 +37,7 @@ run = "go test ./internal/history -run '^$' -bench BenchmarkQueries -benchtime=1
 
 [tasks.release]
 run = "bash scripts/build-release.sh"
+
+[tasks.install]
+depends = ["build"]
+run = "mkdir -p ~/.local/bin && cp bin/shistory ~/.local/bin/shistory"

@@ -131,8 +131,79 @@ func TestLiteralPrefixDedupeAndStableNavigation(t *testing.T) {
 	}
 	// Timestamp order, rather than insertion order, defines older/newer.
 	record(t, root, "imported old", 7, 1)
+	// Navigation skips older repeats of a command unless dedupe is disabled.
 	rows = events(t, "navigate", "--cwd", root, "--before-id", fmt.Sprint(older[0].ID))
+	if rows[0].Command != "git middle" {
+		t.Fatal(rows)
+	}
+	rows = events(t, "navigate", "--cwd", root, "--before-id", fmt.Sprint(older[0].ID), "--dedupe=false")
 	if rows[0].Command != "git newer" {
+		t.Fatal(rows)
+	}
+}
+
+func TestNavigateDedupeKeepsNewestOccurrence(t *testing.T) {
+	root := setup(t)
+	for i, cmd := range []string{"make", "ls", "make", "ls", "make"} {
+		record(t, root, cmd, i+1, 1000+i)
+	}
+	var seen []string
+	args := []string{"navigate", "--cwd", root}
+	for range 4 {
+		rows := events(t, args...)
+		if len(rows) == 0 {
+			break
+		}
+		seen = append(seen, rows[0].Command)
+		args = []string{"navigate", "--cwd", root, "--before-id", fmt.Sprint(rows[0].ID)}
+	}
+	if strings.Join(seen, ",") != "make,ls" {
+		t.Fatal(seen)
+	}
+}
+
+func TestImportZshHistory(t *testing.T) {
+	root := setup(t)
+	file := filepath.Join(root, ".zsh_history")
+	content := ": 1700000000:2;git status\n: 1700000100:0;echo one\\\ntwo\nplain command\n: 1700000200:0;git status\n:  bad\n"
+	if err := os.WriteFile(file, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(t, "import", "--file", file); !strings.Contains(got, "imported 5 of 5") {
+		t.Fatal(got)
+	}
+	if got := run(t, "import", "--file", file); !strings.Contains(got, "imported 0 of 5") {
+		t.Fatal("re-import must be idempotent: " + got)
+	}
+	rows := events(t, "list", "--cwd", root)
+	if len(rows) != 5 || rows[0].Command != "git status" || rows[0].StartedAt != 1700000200000 || rows[0].Status != nil {
+		t.Fatal(rows)
+	}
+	found := false
+	for _, r := range rows {
+		if r.Command == "echo one\ntwo" {
+			found = r.Duration != nil && *r.Duration == 0
+		}
+	}
+	if !found {
+		t.Fatal("multi-line command")
+	}
+	if got := run(t, "suggest", "--cwd", root, "--prefix", "git"); got != "git status\n" {
+		t.Fatal(got)
+	}
+}
+
+func TestImportBashHistory(t *testing.T) {
+	root := setup(t)
+	file := filepath.Join(root, "bash_hist")
+	if err := os.WriteFile(file, []byte("#1700000000\nls -la\nno stamp\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(t, "import", "--file", file, "--shell", "bash"); !strings.Contains(got, "imported 2 of 2") {
+		t.Fatal(got)
+	}
+	rows := events(t, "list", "--cwd", root)
+	if len(rows) != 2 || rows[0].StartedAt != 1700000000000 || rows[0].Shell != "bash" {
 		t.Fatal(rows)
 	}
 }

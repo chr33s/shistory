@@ -122,6 +122,11 @@ unset _shistory_widget
 # Bind only on request. Users can also bind the widgets themselves after loading.
 if [[ "${SHISTORY_BIND_KEYS:-0}" == 1 ]]; then
   bindkey '^R' shistory-reverse-search
+  # Terminals send ^[[A in normal cursor mode and ^[OA in application mode.
+  bindkey '^[[A' shistory-history-up
+  bindkey '^[OA' shistory-history-up
+  bindkey '^[[B' shistory-history-down
+  bindkey '^[OB' shistory-history-down
   [[ -n "${terminfo[kcuu1]:-}" ]] && bindkey "${terminfo[kcuu1]}" shistory-history-up
   [[ -n "${terminfo[kcud1]:-}" ]] && bindkey "${terminfo[kcud1]}" shistory-history-down
 fi

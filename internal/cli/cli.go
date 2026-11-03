@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ Commands:
   suggest   --prefix TEXT [--scope PATH | --cwd DIR] [--limit N]
   navigate  [--query TEXT] [--before-id ID | --after-id ID] [--direction older|newer]
   scope     [--cwd DIR] [--json]
+  import    [--file PATH] [--shell zsh|bash] [--cwd DIR]  (default cwd: $HOME)
   doctor    Check SQLite integrity, schema, permissions, and configuration
   delete    --id ID | --scope DIR
   prune     --before UNIX_MS | --days N [--scope DIR]
@@ -37,7 +39,8 @@ Query options: --limit N --dedupe[=false] --failed --session ID --hostname NAME
 Search/suggest: --rank recent|frecent (default from search.rank)
 Search: --match literal|fuzzy (default literal)
 Output: --format table|json|raw|nul|fzf (default table; suggest defaults raw)
-Navigation outputs ID<TAB>command; --format json is also available.
+Navigation outputs ID<TAB>command, newest occurrence of each command only
+(--dedupe=false visits every execution); --format json is also available.
 Configuration: SHISTORY_CONFIG, SHISTORY_DB, SHISTORY_IGNORE; see readme.md.
 `
 
@@ -93,6 +96,8 @@ func Run(args []string, out, errOut io.Writer) error {
 		action = recordFlags(fs, c, cwd)
 	case "list", "search", "suggest", "navigate":
 		action = queryFlags(fs, c, name, cwd, format, out)
+	case "import":
+		action = importFlags(fs, c, cwd, out)
 	case "doctor":
 		action = func(s *db.Store) error { return doctor(s, c, out) }
 	case "delete", "prune":
@@ -177,13 +182,71 @@ func recordFlags(fs *flag.FlagSet, c config.Config, cwd *string) func(*db.Store)
 	}
 }
 
+func importFlags(fs *flag.FlagSet, c config.Config, cwd *string, out io.Writer) func(*db.Store) error {
+	file := fs.String("file", "", "history file (default $HISTFILE, then ~/.zsh_history or ~/.bash_history)")
+	shell := fs.String("shell", "", "zsh or bash (default from the file name, then $SHELL)")
+	return func(s *db.Store) error {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		if *shell == "" {
+			for _, name := range []string{*file, os.Getenv("SHELL")} {
+				if base := filepath.Base(name); strings.Contains(base, "zsh") {
+					*shell = "zsh"
+				} else if strings.Contains(base, "bash") {
+					*shell = "bash"
+				}
+				if *shell != "" {
+					break
+				}
+			}
+		}
+		if *shell == "" {
+			*shell = "zsh"
+		}
+		if *file == "" {
+			*file = os.Getenv("HISTFILE")
+		}
+		if *file == "" {
+			*file = filepath.Join(home, "."+*shell+"_history")
+		}
+		path, err := config.Expand(*file)
+		if err != nil {
+			return err
+		}
+		if path, err = filepath.Abs(path); err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		events, err := history.ParseHistory(f, *shell)
+		if err != nil {
+			return err
+		}
+		if *cwd == "" {
+			*cwd = home
+		}
+		hostname, _ := os.Hostname()
+		res, err := history.Import(s, c, path, *cwd, hostname, events)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(out, "imported %d of %d entries from %s\n", res.Imported, res.Parsed, path)
+		return err
+	}
+}
+
 func queryFlags(fs *flag.FlagSet, c config.Config, name string, cwd, format *string, out io.Writer) func(*db.Store) error {
 	var q history.Query
 	path := fs.String("scope", "", "cached scope path")
 	global := fs.Bool("global", false, "all scopes")
 	directory := fs.Bool("directory", false, "exact cwd")
 	fs.IntVar(&q.Limit, "limit", c.History.MaxResults, "maximum displayed rows")
-	fs.BoolVar(&q.Dedupe, "dedupe", (name == "search" && c.Search.Dedupe) || name == "suggest", "show each exact command once")
+	fs.BoolVar(&q.Dedupe, "dedupe", (name == "search" && c.Search.Dedupe) || name == "suggest" || name == "navigate", "show each exact command once")
 	fs.BoolVar(&q.Failed, "failed", false, "failed commands")
 	fs.StringVar(&q.Session, "session", "", "session filter")
 	fs.StringVar(&q.Hostname, "hostname", "", "hostname filter")
@@ -204,6 +267,7 @@ func queryFlags(fs *flag.FlagSet, c config.Config, name string, cwd, format *str
 	}
 	if name == "navigate" {
 		q.Limit = 1
+		q.Navigate = true
 		*format = "navigate"
 	}
 	return func(s *db.Store) error {

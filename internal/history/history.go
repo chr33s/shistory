@@ -66,6 +66,9 @@ type Query struct {
 	Rank     string
 	Match    string
 	Now      int64 // Optional Unix milliseconds, for reproducible ranking.
+	// Navigate keeps chronological cursor paging; with Dedupe it visits only
+	// the newest occurrence of each command, so repeats are skipped.
+	Navigate bool
 }
 
 const columns = `id,session_id,seq,started_at,duration_ms,command,exit_status,cwd,scope_type,scope_path,shell,COALESCE(hostname,''),COALESCE(tty,'')`
@@ -83,37 +86,53 @@ func List(s *db.Store, q Query) ([]Event, error) {
 	if (q.BeforeID != 0 || q.AfterID != 0) && q.Rank == "frecent" {
 		return nil, fmt.Errorf("navigation requires recent ranking")
 	}
-	where, args := queryFilter(q)
+	where, args := queryFilter(q, "")
+	if q.Navigate || q.BeforeID != 0 || q.AfterID != 0 {
+		if q.Rank == "frecent" || q.Match == "fuzzy" {
+			return nil, fmt.Errorf("navigation requires recent literal matching")
+		}
+		if q.Dedupe {
+			inner, innerArgs := queryFilter(q, "newer.")
+			where += " AND NOT EXISTS (SELECT 1 FROM history AS newer WHERE newer.command = history.command AND " + inner +
+				" AND (newer.started_at,newer.id) > (history.started_at,history.id))"
+			args = append(args, innerArgs...)
+		}
+		return chronological(s, q, where, args)
+	}
 	if q.Dedupe || q.Rank == "frecent" || q.Match == "fuzzy" {
 		return ranked(s, q, where, args)
 	}
 	return chronological(s, q, where, args)
 }
 
-func queryFilter(q Query) (string, []any) {
+// queryFilter qualifies columns with prefix, for use in correlated subqueries.
+func queryFilter(q Query, prefix string) (string, []any) {
 	where, args := []string{"1=1"}, []any{}
-	add := func(clause string, values ...any) { where = append(where, clause); args = append(args, values...) }
+	add := func(clause string, values ...any) {
+		where = append(where, strings.ReplaceAll(clause, "@", prefix))
+		args = append(args, values...)
+	}
 	if q.Scope != "" {
-		add("scope_path = ?", q.Scope)
+		add("@scope_path = ?", q.Scope)
 	}
 	if q.CWD != "" {
-		add("cwd = ?", q.CWD)
+		add("@cwd = ?", q.CWD)
 	}
 	if q.Text != "" && q.Match != "fuzzy" {
 		pattern := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(q.Text)
-		add(`command LIKE ? ESCAPE '\'`, "%"+pattern+"%")
+		add(`@command LIKE ? ESCAPE '\'`, "%"+pattern+"%")
 	}
 	if q.Prefix != nil {
-		add("substr(command,1,length(?)) = ?", *q.Prefix, *q.Prefix)
+		add("substr(@command,1,length(?)) = ?", *q.Prefix, *q.Prefix)
 	}
 	if q.Failed {
-		add("exit_status <> 0")
+		add("@exit_status <> 0")
 	}
 	if q.Session != "" {
-		add("session_id = ?", q.Session)
+		add("@session_id = ?", q.Session)
 	}
 	if q.Hostname != "" {
-		add("hostname = ?", q.Hostname)
+		add("@hostname = ?", q.Hostname)
 	}
 	return strings.Join(where, " AND "), args
 }
@@ -129,10 +148,10 @@ func chronological(s *db.Store, q Query, where string, args []any) ([]Event, err
 		if err := s.QueryRow("SELECT started_at FROM history WHERE id = ?", id).Scan(&started); err != nil {
 			return nil, fmt.Errorf("navigation cursor: %w", err)
 		}
-		where += " AND (started_at,id) " + op + " (?,?)"
+		where += " AND (history.started_at,history.id) " + op + " (?,?)"
 		args = append(args, started, id)
 	}
-	sql := "SELECT " + columns + " FROM history WHERE " + where + " ORDER BY started_at " + order + ", id " + order
+	sql := "SELECT " + columns + " FROM history WHERE " + where + " ORDER BY history.started_at " + order + ", history.id " + order
 	sql += " LIMIT ?"
 	args = append(args, q.Limit)
 	rows, err := s.Query(sql, args...)

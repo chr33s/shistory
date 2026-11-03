@@ -344,14 +344,28 @@ The `raw` format in this example deliberately omits table metadata.
 Navigation cursors identify a stored row; the backend resolves its timestamp
 and compares `(started_at, id)` tuples. `--before-id` walks older events and
 `--after-id` walks newer events. Concurrent inserts do not shift an offset.
-A cursor whose row has been deleted returns an error. Ranked or deduplicated
-queries do not support navigation cursors.
+A cursor whose row has been deleted returns an error. Navigation deduplicates by
+default: it visits only events with no newer event of the same exact command
+within the same filters, so cursors stay stable while repeats are skipped.
+`--dedupe=false` visits every event. Frecent or fuzzy queries do not support
+navigation cursors.
 
 The Zsh widgets retain the original query, current row ID, last returned buffer,
 and scope. An empty buffer traverses the scope; a nonempty buffer filters by
 substring. Repeated Up walks older matches. Down walks newer matches and restores
 the original query at the newest boundary. Editing the returned buffer or
 changing scope resets navigation.
+
+### Import
+
+`import [--file PATH] [--shell zsh|bash] [--cwd DIR]` parses Zsh (plain or
+`EXTENDED_HISTORY`, unmetafied, backslash-continued multiline) and Bash (plain or
+`#epoch`-stamped) history. Missing metadata is represented as follows: scope is
+that of `--cwd` (default `$HOME`); started_at is the file's timestamp in
+milliseconds, or 0; duration is the Zsh duration or NULL; exit status is NULL;
+session is `import:<absolute file path>`; seq is a positive 63-bit FNV-1a hash of
+scope, timestamp and command, so `ON CONFLICT(session_id,seq) DO NOTHING` makes
+re-import idempotent. Ignore rules apply and all rows insert in one transaction.
 
 ### Output formats
 
@@ -510,7 +524,6 @@ These proposals are not implemented and are not release commitments:
 
 | Proposal                                  | Constraint or reason to revisit                                                                                           |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Import `.zsh_history` and `.bash_history` | Define how imported entries represent missing scope, status, duration, and session metadata.                              |
 | Analytics and export                      | Preserve the distinction between execution events and aggregated commands.                                                |
 | Separate executable-name field            | Could support tool-level analytics; exact-command counts already work without normalization.                              |
 | FTS5 or another SQLite search index       | Consider when measured workloads or tokenized matching requirements justify it; retain literal and fuzzy query contracts. |

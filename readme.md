@@ -85,7 +85,8 @@ alias hg='shistory search --global'
 ### Ranking and matching
 
 Listing and Up/Down navigation are newest first, ordered by execution timestamp
-then row ID. Search and suggestions default to **frecency**: each execution adds
+then row ID. Navigation visits each exact command once, at its newest matching
+execution; `navigate --dedupe=false` visits every execution. Search and suggestions default to **frecency**: each execution adds
 `2^(-age_days / 30)` to its command's score, so a run's contribution halves every
 30 days. Future timestamps contribute at most one run. Scores count only events
 within the selected scope and filters; ties use the latest execution time and
@@ -114,6 +115,22 @@ command text to preserve multiline readability and avoid terminal control
 characters. `suggest` emits command text only, with a final output newline;
 `navigate` emits `ID<TAB>command` with no added newline. `fzf` format is
 `ID<TAB>command<NUL>` so selections preserve multiline commands.
+
+### Importing existing history
+
+```sh
+shistory import                              # $HISTFILE, else ~/.zsh_history
+shistory import --file ~/.bash_history --shell bash
+shistory import --cwd ~/code/app             # attribute entries to that scope
+```
+
+History files record no directory, so imported entries belong to the scope of
+`--cwd` (default `$HOME`) and are always visible to `--global` search. Zsh
+`EXTENDED_HISTORY` timestamps and durations and Bash `HISTTIMEFORMAT` timestamps
+are kept; entries without one get timestamp 0, so they rank below recorded
+history. Exit status is unknown. Ignore rules apply. Re-importing is idempotent,
+including after Zsh rewrites the file, because rows are keyed by file, scope,
+timestamp, and command.
 
 ### Scope
 
@@ -186,11 +203,15 @@ zinit light chr33s/shistory
 zicdreplay # apply completion registrations captured by Zinit
 
 # Opt in to scoped suggestions. A scope cache refreshes at startup and chpwd.
-ZSH_AUTOSUGGEST_STRATEGY=(shistory completion)
+# `history` falls back to native/global history when the scope has no match.
+ZSH_AUTOSUGGEST_STRATEGY=(shistory history completion)
 
 # Bind your terminal's actual sequences. No bindings change by default.
+# Normal (^[[A) and application (^[OA) cursor modes differ; bind both.
 bindkey '^[[A' shistory-history-up
+bindkey '^[OA' shistory-history-up
 bindkey '^[[B' shistory-history-down
+bindkey '^[OB' shistory-history-down
 bindkey '^R' shistory-reverse-search
 
 # Optional native/global history fallback.
@@ -227,8 +248,8 @@ selected scope before applying `history.max_results`, so commands outside the
 initial displayed results remain discoverable. The backend also matches the
 initial editing buffer.
 
-Zsh's `SHISTORY_BIND_KEYS=1` binds Ctrl-R and terminfo Up/Down sequences when
-available. Manual bindings remain the most portable choice.
+Zsh's `SHISTORY_BIND_KEYS=1` binds Ctrl-R and Up/Down in both normal (`^[[A`)
+and application (`^[OA`) cursor modes, plus terminfo sequences when they differ. Manual bindings remain the most portable choice.
 
 ## Bash behavior
 

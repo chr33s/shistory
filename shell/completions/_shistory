@@ -7,6 +7,7 @@ commands=(
   'suggest:Suggest a command with a literal prefix'
   'navigate:Walk scoped history using row IDs'
   'scope:Detect the current scope'
+  'import:Import a zsh or bash history file'
   'doctor:Check database health'
   'prune:Delete old history'
   'delete:Delete a row or scope'
@@ -18,6 +19,7 @@ if (( CURRENT == 2 )); then
 else
   _arguments \
     '--cwd[Directory]:directory:_files -/' \
+    '--file[History file]:file:_files' \
     '--scope[Scope path]:directory:_files -/' \
     '--global[All scopes]' '--directory[Exact directory]' \
     '--limit[Result limit]:number:' '--format[Output format]:format:(table json raw nul fzf)' \
