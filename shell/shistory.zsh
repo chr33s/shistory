@@ -47,7 +47,7 @@ _zsh_autosuggest_strategy_shistory() {
   suggestion=''
   [[ -n "$SHISTORY_SCOPE" ]] || return 0
   # A sentinel preserves trailing newlines through command substitution.
-  result="$(command shistory suggest --scope "$SHISTORY_SCOPE" --prefix "$1"; printf '.')" 2>/dev/null
+  result="$(command shistory suggest --scope "$SHISTORY_SCOPE" --context-session "$SHISTORY_SESSION_ID" --prefix "$1"; printf '.')" 2>/dev/null
   result="${result%.}"
   suggestion="${result%$'\n'}"
 }
@@ -89,11 +89,12 @@ _shistory_reverse_search() {
   local selected
   zle -I
   selected="$(
-    command shistory search --scope "$SHISTORY_SCOPE" --match fuzzy --query "$BUFFER" --format fzf |
-      SHISTORY_SEARCH_SCOPE="$SHISTORY_SCOPE" command fzf --read0 --no-print0 --no-multi \
+    command shistory search --scope "$SHISTORY_SCOPE" --context-session "$SHISTORY_SESSION_ID" \
+      --match fuzzy --query "$BUFFER" --format fzf |
+      SHISTORY_SEARCH_SCOPE="$SHISTORY_SCOPE" SHISTORY_SEARCH_SESSION="$SHISTORY_SESSION_ID" command fzf --read0 --no-print0 --no-multi \
         --disabled --no-sort --with-shell='sh -c' --delimiter=$'\t' --with-nth=2.. \
         --query="$BUFFER" --prompt='scoped> ' \
-        --bind='change:reload(sleep 0.1; command shistory search --scope "$SHISTORY_SEARCH_SCOPE" --match fuzzy --format fzf --query {q})'
+        --bind='change:reload(sleep 0.1; command shistory search --scope "$SHISTORY_SEARCH_SCOPE" --context-session "$SHISTORY_SEARCH_SESSION" --match fuzzy --format fzf --query {q})'
     printf '.'
   )"
   selected="${selected%.}"

@@ -312,3 +312,47 @@ func TestSearchRankingConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestContextRanking(t *testing.T) {
+	root := setup(t)
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(filepath.Join(project, "api"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", "-q", project).CombinedOutput(); err != nil {
+		t.Fatalf("git: %v %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", project, "symbolic-ref", "HEAD", "refs/heads/feature").CombinedOutput(); err != nil {
+		t.Fatalf("git: %v %s", err, out)
+	}
+	config := filepath.Join(root, "config", "shistory", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte("[context]\nenv = ['SHISTORY_TEST_PROFILE']\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHISTORY_TEST_PROFILE", "dev")
+	rec := func(session string, seq int, cmd string) {
+		run(t, "record", "--session", session, "--seq", fmt.Sprint(seq), "--shell", "zsh", "--cwd", project, "--command", cmd, "--status", "0")
+	}
+	rec("a", 1, "git add -p")
+	rec("a", 2, "git commit")
+	for i := 3; i < 6; i++ {
+		rec("a", i, "go test ./...")
+	}
+	rec("live", 1, "git add -p")
+	rows := events(t, "search", "--cwd", project, "--rank", "context", "--context-session", "live", "git")
+	if len(rows) != 2 || rows[0].Command != "git commit" || rows[0].Context["sequence"] != 5 {
+		t.Fatalf("context search: %+v", rows)
+	}
+	if rows[0].Branch != "feature" || string(rows[0].Env) != `{"SHISTORY_TEST_PROFILE":"dev"}` {
+		t.Fatalf("recorded context: %+v", rows[0])
+	}
+	if got := run(t, "suggest", "--cwd", project, "--rank", "context", "--context-session", "live", "--prefix", ""); got != "git commit\n" {
+		t.Fatalf("suggest %q", got)
+	}
+	if got := run(t, "suggest", "--cwd", project, "--rank", "frecent", "--context-session", "live", "--prefix", ""); got != "go test ./...\n" {
+		t.Fatalf("frecent suggest %q", got)
+	}
+}

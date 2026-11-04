@@ -206,9 +206,12 @@ a different path. The schema is defined by the embedded migrations:
 - [001_init.sql](internal/db/001_init.sql) creates the execution log and its indexes.
 - [002_command_stats.sql](internal/db/002_command_stats.sql) adds command summaries,
   invalidation tracking, and maintenance triggers.
+- [003_context.sql](internal/db/003_context.sql) adds nullable `branch` and `env`
+  columns to the execution log.
 
-The current schema version is 2. Existing version-1 databases upgrade
-automatically without removing execution events. Their existing command groups
+The current schema version is 3. Existing version-1 and version-2 databases upgrade
+automatically without removing execution events; earlier rows have no branch or
+environment context. Their existing command groups
 are marked for summary construction; the first query that uses summaries builds
 them. That first query can take longer on a large history. Newer, unsupported
 schema versions are rejected.
@@ -217,7 +220,10 @@ schema versions are rejected.
 
 The `history` table stores `id`, `session_id`, `seq`, `started_at`, `duration_ms`,
 `command`, `exit_status`, `cwd`, `scope_type`, `scope_path`, `shell`, `hostname`,
-and `tty`. Time values are milliseconds. Nullable status and duration distinguish
+`tty`, `branch`, and `env`. `branch` is the checked-out Git branch, read from the
+nearest `.git` directory or worktree file when Git detection is enabled; it is NULL
+when detached or outside Git. `env` is a JSON object of the `context.env`
+variables set in the recording process, or NULL when none are configured. Time values are milliseconds. Nullable status and duration distinguish
 missing metadata from successful or zero-duration executions.
 
 Indexes support scope/time, directory/time, and global/time ordering, with row ID
@@ -338,6 +344,31 @@ $ shistory search --rank recent --format raw migrate
 
 `alembic upgrade head` is excluded because it does not contain `migrate`.
 The `raw` format in this example deliberately omits table metadata.
+
+### Context ranking
+
+`--rank context` multiplies each command's frecency score by factors describing
+the querying shell. Factors equal to 1 are omitted from JSON `context`.
+
+| Factor      | Value                                                                                   |
+| ----------- | --------------------------------------------------------------------------------------- |
+| `sequence`  | `1 + w × P(command \| previous command)` for the `--context-session` session             |
+| `directory` | `1 + w × share of frecency from the current directory`; ancestors and descendants count 0.5 |
+| `branch`    | `1 + w × share of windowed runs on the current Git branch`                                |
+| `env`       | `1 + w × share of windowed runs with the current env value`                     |
+| `session`   | `1 + w × share of windowed runs in the current session`                       |
+| `failure`   | `1 − w × share of windowed runs that exited nonzero`                                      |
+
+`w` is the matching `context.weights` value. The window is the newest
+`context.window` events in the query's scope (and `--directory`/`--hostname`
+filters), ignoring text and prefix filters. Shares and transition probabilities
+use the same 30-day decay as frecency, computed within one snapshot. Transitions
+pair consecutive sequence numbers within a session; imported sessions are excluded
+because their sequence numbers are hashes. The previous command is the session's
+highest-sequence event in any scope. `--context-session` does not filter results,
+unlike `--session`. Derived state is not stored, so deletion and pruning take
+effect immediately. The current directory is `--cwd` or the process working
+directory; the branch and environment are read from it and the process environment.
 
 ### Navigation
 
@@ -461,7 +492,10 @@ is the user-facing reference.
 | `history.ignore`               | Empty list of Go regular expressions.                                            |
 | `search.scope`                 | `auto`; also accepts `directory` or `global`. Applies to search's default scope. |
 | `search.dedupe`                | `true`.                                                                          |
-| `search.rank`                  | `frecent`; also accepts `recent`. Applies to search and suggestions.             |
+| `search.rank`                  | `frecent`; also accepts `recent` or `context`. Applies to search and suggestions. |
+| `context.env`                  | Empty list of environment variable names recorded with each event.               |
+| `context.window`               | `2000` recent events sampled for context signals (1–100000).                     |
+| `context.weights.*`            | `sequence` 4, `directory` 1, `branch` 1, `env` 1, `session` 0.5, `failure` 0.5 (≤ 1). |
 
 `SHISTORY_CONFIG` selects a config file. `SHISTORY_DB` overrides the database
 path. `SHISTORY_IGNORE` adds one Go regular expression to the configured ignore
@@ -502,6 +536,8 @@ Changes must preserve these behaviors:
   are captured as one event where the shell lifecycle permits it.
 - Repeated executions remain stored; repeated delivery of the same session/sequence
   does not create another event. Ignore rules retain their privacy behavior.
+- Context ranking follows the session's previous command, current directory,
+  branch, configured environment, and failures, and reports its factors.
 - Search deduplicates nonadjacent commands and computes frequencies within all
   active filters. Literal prefix characters and fuzzy case rules remain intact.
 - Search can find a command older than 10,000 newer events. Live Ctrl-R can find

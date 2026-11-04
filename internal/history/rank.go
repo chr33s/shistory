@@ -3,7 +3,6 @@ package history
 import (
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +23,8 @@ type candidate struct {
 	lastUsed   int64
 	executions int64
 	score      float64
+	dirScore   float64 // Frecency weighted by directory proximity.
+	factors    map[string]float64
 }
 
 // Fuzzy search is an ordered subsequence match. Lowercase queries ignore case;
@@ -93,9 +94,9 @@ func rankedSnapshot(s *db.Store, q Query, where string, args []any) ([]Event, er
 		}
 	}
 	collect := func(summary bool) error {
-		query := "SELECT id,command,started_at,1,1.0 FROM history WHERE " + where
+		query := "SELECT id,command,started_at,1,1.0,cwd FROM history WHERE " + where
 		if summary {
-			query = "SELECT last_id,command,last_used,executions,weight FROM command_stats WHERE " + where
+			query = "SELECT last_id,command,last_used,executions,weight,cwd FROM command_stats WHERE " + where
 		}
 		rows, err := tx.Query(query, args...)
 		if err != nil {
@@ -105,7 +106,8 @@ func rankedSnapshot(s *db.Store, q Query, where string, args []any) ([]Event, er
 		for rows.Next() {
 			var item candidate
 			var weight float64
-			if err = rows.Scan(&item.id, &item.command, &item.lastUsed, &item.executions, &weight); err != nil {
+			var cwd string
+			if err = rows.Scan(&item.id, &item.command, &item.lastUsed, &item.executions, &weight, &cwd); err != nil {
 				return err
 			}
 			// Future timestamps need individual clamping; summaries cannot represent
@@ -122,7 +124,9 @@ func rankedSnapshot(s *db.Store, q Query, where string, args []any) ([]Event, er
 				groups[item.command] = group
 			}
 			group.executions += item.executions
-			group.score += weight * math.Exp2(math.Min(0, (float64(item.lastUsed)-float64(now))/halfLifeMS))
+			decayed := weight * decay(item.lastUsed, now)
+			group.score += decayed
+			group.dirScore += decayed * proximity(cwd, q.Context.CWD)
 			if item.lastUsed > group.lastUsed || item.lastUsed == group.lastUsed && item.id > group.id {
 				group.lastUsed, group.id = item.lastUsed, item.id
 			}
@@ -140,6 +144,15 @@ func rankedSnapshot(s *db.Store, q Query, where string, args []any) ([]Event, er
 	if err != nil {
 		return nil, err
 	}
+	if q.Rank == "context" {
+		sig, err := loadContextSignals(tx, q, now)
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range groups {
+			g.score, g.factors = sig.apply(q.Context, g)
+		}
+	}
 	if q.Dedupe {
 		for _, g := range groups {
 			all = append(all, *g)
@@ -147,7 +160,7 @@ func rankedSnapshot(s *db.Store, q Query, where string, args []any) ([]Event, er
 	}
 	sort.Slice(all, func(i, j int) bool {
 		a, b := all[i], all[j]
-		if q.Rank == "frecent" && groups[a.command].score != groups[b.command].score {
+		if q.Rank != "recent" && groups[a.command].score != groups[b.command].score {
 			return groups[a.command].score > groups[b.command].score
 		}
 		if a.lastUsed != b.lastUsed {
@@ -163,12 +176,11 @@ func rankedSnapshot(s *db.Store, q Query, where string, args []any) ([]Event, er
 	result := make([]Event, 0, len(all))
 	for _, item := range all {
 		var e Event
-		err = tx.QueryRow("SELECT "+columns+" FROM history WHERE id=?", item.id).Scan(&e.ID, &e.Session, &e.Seq, &e.StartedAt, &e.Duration, &e.Command, &e.Status, &e.CWD, &e.ScopeType, &e.ScopePath, &e.Shell, &e.Hostname, &e.TTY)
-		if err != nil {
+		if err = scanEvent(tx.QueryRow("SELECT "+columns+" FROM history WHERE id=?", item.id), &e); err != nil {
 			return nil, err
 		}
 		g := groups[item.command]
-		e.Executions, e.LastUsed, e.Score = g.executions, g.lastUsed, g.score
+		e.Executions, e.LastUsed, e.Score, e.Context = g.executions, g.lastUsed, g.score, g.factors
 		result = append(result, e)
 	}
 	if err = tx.Commit(); err != nil {

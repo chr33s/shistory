@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,7 +32,41 @@ type Config struct {
 		Rank   string `toml:"rank"`
 		Dedupe bool   `toml:"dedupe"`
 	} `toml:"search"`
+	Context struct {
+		Env     []string `toml:"env"`
+		Window  int      `toml:"window"`
+		Weights Weights  `toml:"weights"`
+	} `toml:"context"`
 	ignore []*regexp.Regexp
+}
+
+// Weights multiply frecency in context ranking: each factor is 1 + weight×signal,
+// except failure, which is 1 − weight×failure ratio.
+type Weights struct {
+	Sequence  float64 `toml:"sequence"`
+	Directory float64 `toml:"directory"`
+	Branch    float64 `toml:"branch"`
+	Env       float64 `toml:"env"`
+	Session   float64 `toml:"session"`
+	Failure   float64 `toml:"failure"`
+}
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// ContextEnv encodes the configured environment variables that are set, as a
+// JSON object with sorted keys. It is empty when no variables are configured.
+func (c Config) ContextEnv(lookup func(string) (string, bool)) string {
+	if len(c.Context.Env) == 0 {
+		return ""
+	}
+	values := map[string]string{}
+	for _, name := range c.Context.Env {
+		if v, ok := lookup(name); ok {
+			values[name] = v
+		}
+	}
+	b, _ := json.Marshal(values)
+	return string(b)
 }
 
 func Expand(path string) (string, error) {
@@ -63,6 +98,8 @@ func Load() (Config, error) {
 	c.Root.Git = true
 	c.History.IgnoreLeadingSpace, c.History.StoreFailed, c.History.MaxResults = true, true, 100
 	c.Search.Scope, c.Search.Dedupe, c.Search.Rank = "auto", true, "frecent"
+	c.Context.Window = 2000
+	c.Context.Weights = Weights{Sequence: 4, Directory: 1, Branch: 1, Env: 1, Session: 0.5, Failure: 0.5}
 	path := os.Getenv("SHISTORY_CONFIG")
 	explicit := path != ""
 	if !explicit {
@@ -104,8 +141,25 @@ func Load() (Config, error) {
 	if c.Search.Scope != "auto" && c.Search.Scope != "global" && c.Search.Scope != "directory" {
 		return c, fmt.Errorf("search.scope must be auto, directory, or global")
 	}
-	if c.Search.Rank != "recent" && c.Search.Rank != "frecent" {
-		return c, fmt.Errorf("search.rank must be recent or frecent")
+	if c.Search.Rank != "recent" && c.Search.Rank != "frecent" && c.Search.Rank != "context" {
+		return c, fmt.Errorf("search.rank must be recent, frecent, or context")
+	}
+	if c.Context.Window < 1 || c.Context.Window > 100000 {
+		return c, fmt.Errorf("context.window must be between 1 and 100000")
+	}
+	w := c.Context.Weights
+	for _, v := range []float64{w.Sequence, w.Directory, w.Branch, w.Env, w.Session, w.Failure} {
+		if v < 0 || v > 100 {
+			return c, fmt.Errorf("context.weights must be between 0 and 100")
+		}
+	}
+	if w.Failure > 1 {
+		return c, fmt.Errorf("context.weights.failure must be between 0 and 1")
+	}
+	for _, name := range c.Context.Env {
+		if !envName.MatchString(name) {
+			return c, fmt.Errorf("context.env must contain variable names: %q", name)
+		}
 	}
 	for _, marker := range c.Root.Markers {
 		if marker == "" || marker == "." || marker == ".." || filepath.Base(marker) != marker {

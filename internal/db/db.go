@@ -21,7 +21,10 @@ var migration string
 //go:embed 002_command_stats.sql
 var commandStatsMigration string
 
-const SchemaVersion = 2
+//go:embed 003_context.sql
+var contextMigration string
+
+const SchemaVersion = 3
 
 type Store struct{ *sql.DB }
 
@@ -106,6 +109,11 @@ func (s *Store) initialize() error {
 	}
 	if version < 2 {
 		if _, err = conn.ExecContext(context.Background(), commandStatsMigration); err != nil {
+			return err
+		}
+	}
+	if version < 3 {
+		if _, err = conn.ExecContext(context.Background(), contextMigration); err != nil {
 			return err
 		}
 	}

@@ -61,4 +61,19 @@ func TestDetection(t *testing.T) {
 	if err != nil || s.Path != worktree || s.Type != "project" {
 		t.Fatalf("worktree %+v %v", s, err)
 	}
+	if s.Branch != "linked" || Branch(worktree) != "linked" {
+		t.Fatalf("worktree branch %+v", s)
+	}
+	os.Unsetenv("GIT_DIR") // Restored by t.Setenv's cleanup.
+	git("-C", filepath.Dir(nested), "symbolic-ref", "HEAD", "refs/heads/feature/x")
+	if b := Branch(nested); b != "feature/x" {
+		t.Fatalf("nested branch %q", b)
+	}
+	git("-C", worktree, "checkout", "-q", "--detach")
+	if b := Branch(worktree); b != "" {
+		t.Fatalf("detached branch %q", b)
+	}
+	if b := Branch(root); b != "" {
+		t.Fatalf("non-repository branch %q", b)
+	}
 }

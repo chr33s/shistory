@@ -16,6 +16,42 @@ type Scope struct {
 	CWD  string `json:"cwd"`
 	Type string `json:"scope_type"`
 	Path string `json:"scope_path"`
+	// Branch is the checked-out Git branch, empty when detached or not in Git.
+	Branch string `json:"branch,omitempty"`
+}
+
+// Branch reads the current branch from the nearest .git directory or worktree
+// file without running git. Detached HEADs and non-repositories return "".
+func Branch(dir string) string {
+	for ; ; dir = filepath.Dir(dir) {
+		dotgit := filepath.Join(dir, ".git")
+		if info, err := os.Stat(dotgit); err == nil {
+			gitdir := dotgit
+			if !info.IsDir() {
+				b, err := os.ReadFile(dotgit)
+				target, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir: ")
+				if err != nil || !ok {
+					return ""
+				}
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(dir, target)
+				}
+				gitdir = target
+			}
+			head, err := os.ReadFile(filepath.Join(gitdir, "HEAD"))
+			if err != nil {
+				return ""
+			}
+			ref, ok := strings.CutPrefix(strings.TrimSpace(string(head)), "ref: refs/heads/")
+			if !ok {
+				return ""
+			}
+			return ref
+		}
+		if filepath.Dir(dir) == dir {
+			return ""
+		}
+	}
 }
 
 func Canonical(path string) (string, error) {
@@ -63,7 +99,7 @@ func Detect(c config.Config, cwd string) (Scope, error) {
 		if out, err := cmd.Output(); err == nil {
 			root, err := Canonical(strings.TrimSuffix(string(out), "\n"))
 			if err == nil {
-				s.Type, s.Path = "project", root
+				s.Type, s.Path, s.Branch = "project", root, Branch(cwd)
 				return s, nil
 			}
 		}

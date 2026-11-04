@@ -26,12 +26,12 @@ else
     '--prefix[Literal prefix]:prefix:' '--query[Substring query]:query:' \
     '--before-id[Older than row]:id:' '--after-id[Newer than row]:id:' \
     '--direction[Navigation direction]:direction:(older newer)' \
-    '--session[Session ID]:session:' '--seq[Sequence]:number:' \
+    '--session[Session ID]:session:' '--context-session[Ranking session]:session:' '--seq[Sequence]:number:' \
     '--shell[Shell name]:shell:(bash zsh)' '--command[Command text]:command:' \
     '--started-at[Unix milliseconds]:number:' '--duration-ms[Duration]:number:' \
     '--status[Exit status]:number:' '--hostname[Host]:host:' '--tty[Terminal]:tty:' \
     '--failed[Failed commands only]' '--dedupe[Show each command once]' \
-    '--rank[Result ranking]:ranking:(recent frecent)' \
+    '--rank[Result ranking]:ranking:(recent frecent context)' \
     '--match[Search matching]:matching:(literal fuzzy)' \
     '--id[Row ID]:id:' '--before[Unix millisecond cutoff]:number:' \
     '--days[Retention days]:number:' '--json[JSON scope]' '--help[Usage]'

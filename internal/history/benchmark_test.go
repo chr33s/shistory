@@ -42,6 +42,8 @@ func benchmarkStore(b *testing.B, size int) *db.Store {
 	return s
 }
 
+var benchContext = Context{Session: "bench", CWD: "/project/00", Branch: "main", Window: 2000, Weights: testWeights}
+
 func BenchmarkQueries(b *testing.B) {
 	binary := filepath.Join(b.TempDir(), "shistory")
 	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/shistory").CombinedOutput(); err != nil {
@@ -61,6 +63,8 @@ func BenchmarkQueries(b *testing.B) {
 				{"scoped_rare", Query{Scope: "/project/00", Text: "deployment-999", Limit: 100, Dedupe: true, Rank: "frecent"}},
 				{"scoped_suggest", Query{Scope: "/project/00", Prefix: &prefix, Limit: 1, Dedupe: true, Rank: "frecent"}},
 				{"global_suggest", Query{Prefix: &prefix, Limit: 1, Dedupe: true, Rank: "frecent"}},
+				{"scoped_context_search", Query{Scope: "/project/00", Text: "deployment", Limit: 100, Dedupe: true, Rank: "context", Context: benchContext}},
+				{"scoped_context_suggest", Query{Scope: "/project/00", Prefix: &prefix, Limit: 1, Dedupe: true, Rank: "context", Context: benchContext}},
 			}
 			for _, tc := range cases {
 				b.Run(tc.name, func(b *testing.B) {

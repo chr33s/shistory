@@ -1,6 +1,8 @@
 package history
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,22 +12,40 @@ import (
 )
 
 type Event struct {
-	ID         int64   `json:"id"`
-	Session    string  `json:"session_id"`
-	Seq        int64   `json:"seq"`
-	StartedAt  int64   `json:"started_at"`
-	Duration   *int64  `json:"duration_ms"`
-	Command    string  `json:"command"`
-	Status     *int    `json:"exit_status"`
-	CWD        string  `json:"cwd"`
-	ScopeType  string  `json:"scope_type"`
-	ScopePath  string  `json:"scope_path"`
-	Shell      string  `json:"shell"`
-	Hostname   string  `json:"hostname"`
-	TTY        string  `json:"tty"`
-	Executions int64   `json:"executions,omitempty"`
-	LastUsed   int64   `json:"last_used,omitempty"`
-	Score      float64 `json:"score,omitempty"`
+	ID        int64  `json:"id"`
+	Session   string `json:"session_id"`
+	Seq       int64  `json:"seq"`
+	StartedAt int64  `json:"started_at"`
+	Duration  *int64 `json:"duration_ms"`
+	Command   string `json:"command"`
+	Status    *int   `json:"exit_status"`
+	CWD       string `json:"cwd"`
+	ScopeType string `json:"scope_type"`
+	ScopePath string `json:"scope_path"`
+	Shell     string `json:"shell"`
+	Hostname  string `json:"hostname"`
+	TTY       string `json:"tty"`
+	Branch    string `json:"branch,omitempty"`
+	// Env holds the configured context variables as a JSON object.
+	Env        json.RawMessage `json:"env,omitempty"`
+	Executions int64           `json:"executions,omitempty"`
+	LastUsed   int64           `json:"last_used,omitempty"`
+	Score      float64         `json:"score,omitempty"`
+	// Context lists the context-ranking multipliers that differ from 1.
+	Context map[string]float64 `json:"context,omitempty"`
+}
+
+type scanner interface{ Scan(...any) error }
+
+func scanEvent(r scanner, e *Event) error {
+	var env sql.NullString
+	if err := r.Scan(&e.ID, &e.Session, &e.Seq, &e.StartedAt, &e.Duration, &e.Command, &e.Status, &e.CWD, &e.ScopeType, &e.ScopePath, &e.Shell, &e.Hostname, &e.TTY, &e.Branch, &env); err != nil {
+		return err
+	}
+	if env.Valid && env.String != "" {
+		e.Env = json.RawMessage(env.String)
+	}
+	return nil
 }
 
 func Record(s *db.Store, c config.Config, e Event) error {
@@ -45,9 +65,19 @@ func Record(s *db.Store, c config.Config, e Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.Exec(`INSERT INTO history(session_id,seq,started_at,duration_ms,command,exit_status,cwd,scope_type,scope_path,shell,hostname,tty)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id,seq) DO NOTHING`,
-		e.Session, e.Seq, e.StartedAt, e.Duration, e.Command, e.Status, sc.CWD, sc.Type, sc.Path, e.Shell, e.Hostname, e.TTY)
+	var branch, env any
+	if sc.Branch != "" {
+		branch = sc.Branch
+	}
+	if len(e.Env) > 0 {
+		if !json.Valid(e.Env) {
+			return fmt.Errorf("env must be a JSON object")
+		}
+		env = string(e.Env)
+	}
+	_, err = s.Exec(`INSERT INTO history(session_id,seq,started_at,duration_ms,command,exit_status,cwd,scope_type,scope_path,shell,hostname,tty,branch,env)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id,seq) DO NOTHING`,
+		e.Session, e.Seq, e.StartedAt, e.Duration, e.Command, e.Status, sc.CWD, sc.Type, sc.Path, e.Shell, e.Hostname, e.TTY, branch, env)
 	return err
 }
 
@@ -69,26 +99,40 @@ type Query struct {
 	// Navigate keeps chronological cursor paging; with Dedupe it visits only
 	// the newest occurrence of each command, so repeats are skipped.
 	Navigate bool
+	// Context supplies the current shell state for Rank "context".
+	Context Context
 }
 
-const columns = `id,session_id,seq,started_at,duration_ms,command,exit_status,cwd,scope_type,scope_path,shell,COALESCE(hostname,''),COALESCE(tty,'')`
+// Context describes where a query runs. Session is used only for ranking and,
+// unlike Query.Session, does not filter results.
+type Context struct {
+	Session string
+	CWD     string
+	Branch  string
+	Env     string // As produced by config.ContextEnv.
+	Window  int    // Most recent events sampled for sequence and tag signals.
+	Weights config.Weights
+}
+
+const columns = `id,session_id,seq,started_at,duration_ms,command,exit_status,cwd,scope_type,scope_path,shell,COALESCE(hostname,''),COALESCE(tty,''),COALESCE(branch,''),env`
 
 func List(s *db.Store, q Query) ([]Event, error) {
 	if q.Limit < 1 || q.Limit > 100000 {
 		return nil, fmt.Errorf("limit must be between 1 and 100000")
 	}
-	if q.Rank != "" && q.Rank != "recent" && q.Rank != "frecent" {
-		return nil, fmt.Errorf("rank must be recent or frecent")
+	if q.Rank != "" && q.Rank != "recent" && q.Rank != "frecent" && q.Rank != "context" {
+		return nil, fmt.Errorf("rank must be recent, frecent, or context")
 	}
 	if q.Match != "" && q.Match != "literal" && q.Match != "fuzzy" {
 		return nil, fmt.Errorf("match must be literal or fuzzy")
 	}
-	if (q.BeforeID != 0 || q.AfterID != 0) && q.Rank == "frecent" {
+	ranks := q.Rank == "frecent" || q.Rank == "context"
+	if (q.BeforeID != 0 || q.AfterID != 0) && ranks {
 		return nil, fmt.Errorf("navigation requires recent ranking")
 	}
 	where, args := queryFilter(q, "")
 	if q.Navigate || q.BeforeID != 0 || q.AfterID != 0 {
-		if q.Rank == "frecent" || q.Match == "fuzzy" {
+		if ranks || q.Match == "fuzzy" {
 			return nil, fmt.Errorf("navigation requires recent literal matching")
 		}
 		if q.Dedupe {
@@ -99,7 +143,7 @@ func List(s *db.Store, q Query) ([]Event, error) {
 		}
 		return chronological(s, q, where, args)
 	}
-	if q.Dedupe || q.Rank == "frecent" || q.Match == "fuzzy" {
+	if q.Dedupe || ranks || q.Match == "fuzzy" {
 		return ranked(s, q, where, args)
 	}
 	return chronological(s, q, where, args)
@@ -162,7 +206,7 @@ func chronological(s *db.Store, q Query, where string, args []any) ([]Event, err
 	result := []Event{}
 	for rows.Next() {
 		var e Event
-		if err := rows.Scan(&e.ID, &e.Session, &e.Seq, &e.StartedAt, &e.Duration, &e.Command, &e.Status, &e.CWD, &e.ScopeType, &e.ScopePath, &e.Shell, &e.Hostname, &e.TTY); err != nil {
+		if err := scanEvent(rows, &e); err != nil {
 			return nil, err
 		}
 		result = append(result, e)

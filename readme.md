@@ -107,6 +107,30 @@ are literal; fzf's extended query operators are not interpreted. Suggestions
 always use a literal, case-sensitive prefix. `--session`, `--hostname`, and
 `--failed` filter events before aggregation and ranking.
 
+### Context ranking
+
+`--rank context` (or `[search] rank = "context"`) starts from frecency and boosts
+commands that fit where you are:
+
+- **Sequence:** commands that followed the session's previous command, e.g.
+  `git commit` after `git add -p`. Adapters pass `--context-session`.
+- **Directory:** commands run in the current directory (half credit for parent
+  and child directories) within the project.
+- **Branch:** commands run on the current Git branch.
+- **Environment:** commands run with the same values of `[context] env`
+  variables, such as `AWS_PROFILE` or `VIRTUAL_ENV`.
+- **Session:** commands from the current shell session.
+- **Failures:** commands that recently exited nonzero rank lower.
+
+Signals other than directory use the newest `context.window` events in the scope,
+so cost stays constant as history grows (about 2.5 ms per suggestion on the
+benchmark). JSON results include a `context` object with each applied multiplier.
+Up/Down navigation stays chronological.
+
+```sh
+shistory search --rank context --context-session "$SHISTORY_SESSION_ID" --format json git
+```
+
 ### Output formats
 
 `--format json` returns complete structured events, `raw` prints command text,
@@ -162,7 +186,19 @@ ignore = ["^ls$", "^pwd$", "^clear$"]
 [search]
 scope = "auto" # auto, directory, or global; affects search's default scope
 dedupe = true
-rank = "frecent" # frecent or recent; affects search and suggestions
+rank = "frecent" # frecent, recent, or context; affects search and suggestions
+
+[context]
+env = [] # opt in, e.g. ["AWS_PROFILE", "VIRTUAL_ENV", "KUBECONFIG"]
+window = 2000
+
+[context.weights] # factor = 1 + weight × signal; failure = 1 − weight × ratio
+sequence = 4.0
+directory = 1.0
+branch = 1.0
+env = 1.0
+session = 0.5
+failure = 0.5 # at most 1
 ```
 
 `[root] vcs = false` is an alias for disabling Git detection. `SHISTORY_CONFIG`
@@ -174,7 +210,8 @@ back to `~/.local/share/shistory/history.db`.
 Leading-space commands are ignored by default. The dedicated database directory
 has mode 0700 and the database 0600. Custom shared parent directories are not
 chmodded. Credentials can still appear in recorded commands; ignore rules do
-not perform secret detection.
+not perform secret detection. `context.env` values are stored in plain text, so
+list only non-secret variables; values are read when the command finishes.
 
 ```sh
 shistory delete --id 928
@@ -291,7 +328,7 @@ literal shell syntax in queries. CI runs both profiles on macOS and Linux.
 Search keeps per-directory command summaries in SQLite, updated transactionally
 with new events. Deletion and pruning rebuild only affected command summaries.
 Session, hostname, and failure filters calculate scores from their matching raw
-events. Schema v1 databases upgrade automatically to v2, preserving history;
+events. Schema v1 and v2 databases upgrade automatically to v3, preserving history;
 the first query that uses summaries builds them for existing events and can take
 longer on a large database. Ranked queries and their representative events use
 one database snapshot.
@@ -310,6 +347,8 @@ Measured on Apple M5 Max / macOS arm64, Go 1.26.5, averaging 10 iterations:
 | Scoped fuzzy search | 1.38 ms | 1.44 ms |
 | Global frecency search | 10.80 ms | 13.01 ms |
 | Scoped suggestion, query only | 0.13 ms | 0.14 ms |
+| Scoped context search | 4.67 ms | 4.61 ms |
+| Scoped context suggestion, query only | 2.48 ms | 2.52 ms |
 | Scoped suggestion, full CLI process | 6.55 ms | 7.01 ms |
 
 The fixture has 20 projects with 1,000 distinct commands each, shared across

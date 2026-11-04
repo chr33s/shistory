@@ -36,7 +36,8 @@ Commands:
   session   Generate a random shell session ID
 
 Query options: --limit N --dedupe[=false] --failed --session ID --hostname NAME
-Search/suggest: --rank recent|frecent (default from search.rank)
+Search/suggest: --rank recent|frecent|context (default from search.rank)
+  --context-session ID ranks by that session's previous command (no filter)
 Search: --match literal|fuzzy (default literal)
 Output: --format table|json|raw|nul|fzf (default table; suggest defaults raw)
 Navigation outputs ID<TAB>command, newest occurrence of each command only
@@ -178,6 +179,9 @@ func recordFlags(fs *flag.FlagSet, c config.Config, cwd *string) func(*db.Store)
 		if e.Hostname == "" {
 			e.Hostname, _ = os.Hostname()
 		}
+		if env := c.ContextEnv(os.LookupEnv); env != "" {
+			e.Env = []byte(env)
+		}
 		return history.Record(s, c, e)
 	}
 }
@@ -254,7 +258,8 @@ func queryFlags(fs *flag.FlagSet, c config.Config, name string, cwd, format *str
 	fs.Int64Var(&q.AfterID, "after-id", 0, "newer than row ID")
 	fs.StringVar(&q.Text, "query", "", "substring")
 	if name == "search" || name == "suggest" {
-		fs.StringVar(&q.Rank, "rank", c.Search.Rank, "recent or frecent")
+		fs.StringVar(&q.Rank, "rank", c.Search.Rank, "recent, frecent, or context")
+		fs.StringVar(&q.Context.Session, "context-session", "", "current session, for context ranking")
 	}
 	if name == "search" {
 		fs.StringVar(&q.Match, "match", "literal", "literal substring or fuzzy subsequence")
@@ -292,6 +297,11 @@ func queryFlags(fs *flag.FlagSet, c config.Config, name string, cwd, format *str
 		if err := resolveQuery(c, &q, *cwd, *path, *global, *directory, name == "search"); err != nil {
 			return err
 		}
+		if q.Rank == "context" {
+			if err := resolveContext(c, &q, *cwd); err != nil {
+				return err
+			}
+		}
 		if name == "navigate" && *direction == "newer" && q.AfterID == 0 {
 			return nil
 		}
@@ -328,6 +338,29 @@ func resolveQuery(c config.Config, q *history.Query, cwd, path string, global, d
 	} else {
 		q.Scope = sc.Path
 	}
+	return nil
+}
+
+// resolveContext captures the querying shell's directory, branch, and
+// configured environment. The process inherits the shell's working directory.
+func resolveContext(c config.Config, q *history.Query, cwd string) error {
+	if cwd == "" {
+		var err error
+		if cwd, err = os.Getwd(); err != nil {
+			return err
+		}
+	}
+	dir, err := scope.Canonical(cwd)
+	if err != nil {
+		return err
+	}
+	q.Context.CWD = dir
+	if c.Root.Git {
+		q.Context.Branch = scope.Branch(dir)
+	}
+	q.Context.Env = c.ContextEnv(os.LookupEnv)
+	q.Context.Window = c.Context.Window
+	q.Context.Weights = c.Context.Weights
 	return nil
 }
 
